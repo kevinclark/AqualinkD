@@ -1,5 +1,5 @@
 // Host test of the RS Serial Adapter queue (serialadapter.c): commands go out in order, a setpoint pair stays back
-// to back (also with other threads pushing), overflow never splits it.
+// to back (also with other threads pushing), overflow never splits it, and a 0x07 takes a value only after a readySP.
 // Run: test/rssa_queue_test.sh
 #include "../source/serialadapter.c"
 #include <assert.h>
@@ -16,7 +16,7 @@ static void expect(unsigned char src, unsigned char a, unsigned char b, const ch
 static _Atomic int stop = 0;
 static void *pair_pusher(void *a) { while (!stop) queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 77); return NULL; }
 static void *set_pusher(void *a) { while (!stop) { rssadapter_device_state(0x16, RS_SA_ON); rssadapter_device_state(0x17, 0x00); } return NULL; }
-static void reset(void) { _rssa_q_length = 0; }
+static void reset(void) { _rssa_q_length = 0; _rssa_last_was_readysp = false; }
 
 int main(void) {
   // 1. Commands go out in the order queued, one per status message, and the next comes only after the last is gone.
@@ -33,6 +33,37 @@ int main(void) {
   rssadapter_device_state(0x17, RS_SA_OFF);                      // arrives between the halves
   expect(0x07, 0x00, 0x16, "value next");
   expect(CMD_STATUS, RS_SA_OFF, 0x17, "command after the pair");
+
+  // 3b. A 0x13 reply between readySP and the 0x07 gets a null and does not lose the value.
+  reset();
+  queue_aqualink_rssadapter_setpoint(RS_SA_SPASP, 101);
+  rssadapter_device_state(0x17, RS_SA_ON);
+  expect(CMD_STATUS, RS_SA_SPASP, 0x35, "readySP");
+  expect(0x13, 0x00, 0x00, "0x13 in between: null");
+  expect(0x07, 0x00, 101, "value still follows");
+  expect(CMD_STATUS, RS_SA_ON, 0x17, "then the command");
+
+  // 5. A 0x07 after an on/off (not a readySP) gets a null and consumes nothing.
+  reset();
+  rssadapter_device_state(0x17, RS_SA_ON); rssadapter_device_state(0x17, 0x00);
+  expect(CMD_STATUS, RS_SA_ON, 0x17, "on/off");
+  expect(0x07, 0x00, 0x00, "null to 0x07 after on/off");
+  expect(CMD_STATUS, 0x00, 0x17, "read-back still queued");
+
+  // 5b. A late 0x07 (a status message came between readySP and it) gets a null; queued commands stay.
+  reset();
+  queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 80);
+  rssadapter_device_state(0x16, RS_SA_OFF);
+  expect(CMD_STATUS, RS_SA_POOLSP, 0x35, "readySP");
+  expect(CMD_STATUS, 0x00, 80, "value went out on a status");
+  expect(0x07, 0x00, 0x00, "late 0x07 gets null");
+  expect(CMD_STATUS, RS_SA_OFF, 0x16, "command still queued");
+
+  // 5c. An on/off to device 0x35 looks like readySP in byte 3 but is not one: a 0x07 after it gets a null.
+  reset();
+  rssadapter_device_state(0x35, RS_SA_ON); rssadapter_device_state(0x16, RS_SA_OFF);
+  expect(CMD_STATUS, RS_SA_ON, 0x35, "set to 0x35");
+  expect(0x07, 0x00, 0x00, "0x07 after it gets null");
 
   // 6. Overflow: a pair that doesn't fit is refused whole, never half-queued.
   reset();

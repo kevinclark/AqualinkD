@@ -20,6 +20,9 @@ int _rssa_q_length = 0;
 static pthread_mutex_t _rssa_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 // get_rssa_cmd pops the entry it hands out into this buffer, so a later push can't change what is sent.
 static unsigned char _rssa_out[4];
+// The last entry handed out was a setpoint's first half ({..,typeID,0x35}); only then may a 0x07 ("send the value
+// now") take the next command as the value. Any other 0x07 gets a null command.
+static bool _rssa_last_was_readysp = false;
 //int _rssa_position = 0;
 
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
@@ -87,11 +90,24 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   if ( source_message_type == 0x07 )
     LOG(RSSA_LOG,LOG_DEBUG, "Replying to 2nd command sequence\n");
 
-  if (source_message_type == CMD_PROBE)
+  // Other messages (e.g. a 0x13 reply) leave _rssa_last_was_readysp alone: the panel may send one between readySP
+  // and its 0x07.
+  if (source_message_type == 0x07) {
+    bool after_readysp = _rssa_last_was_readysp;
+    _rssa_last_was_readysp = false;
+    if (!after_readysp) {
+      LOG(RSSA_LOG,LOG_ERR, "Panel asked for a value, but the last command sent was not a setpoint; answering with a null command\n");
+      return rssa_null;
+    }
+  }
+
+  if (source_message_type == CMD_PROBE) {
+    _rssa_last_was_readysp = false;
     return probe_reply;
-  else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
+  } else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
     return rssa_null; // Only send command on status messages.
   else  {
+    _rssa_last_was_readysp = false;
     unsigned char *cmd = NULL;
     int left = 0;
     pthread_mutex_lock(&_rssa_q_mutex);
@@ -103,6 +119,7 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
     if (cmd != NULL) {
       LOG(RSSA_LOG,LOG_DEBUG, "Pull from queue, %d left 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",left,cmd[0],cmd[1],cmd[2],cmd[3]);
+      _rssa_last_was_readysp = (cmd[3] == 0x35 && cmd[2] != 0x00 && cmd[2] < RS_SA_OFF); // not a set to device 0x35
       return cmd;
     }
   }

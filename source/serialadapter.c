@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #include "aq_serial.h"
 #include "aqualink.h"
@@ -13,9 +14,12 @@
 
 #define RSSA_QLEN 40
 
+// Filled from the network and timer threads and the serial thread itself, drained by the serial thread.
 unsigned char _rssa_queue[RSSA_QLEN][4];
 int _rssa_q_length = 0;
-bool _rssa_last_was_queue = false;
+static pthread_mutex_t _rssa_q_mutex = PTHREAD_MUTEX_INITIALIZER;
+// get_rssa_cmd pops the entry it hands out into this buffer, so a later push can't change what is sent.
+static unsigned char _rssa_out[4];
 //int _rssa_position = 0;
 
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
@@ -42,21 +46,38 @@ void processRSSALEDstate(struct aqualinkdata *aqdata, unsigned char *packet)
 }
 
 
-bool push_rssa_cmd(unsigned char *cmd) {
-  if (_rssa_q_length >= RSSA_QLEN ) {
-    LOG(RSSA_LOG,LOG_ERR, "Queue overflow, last command ignored!\n");
-    return false;
+// Append n commands as one unit: all or none, never interleaved with another thread's push. A setpoint's two halves
+// must go out back to back (the panel takes the reply after readySP as the value).
+static bool push_rssa_cmds(unsigned char cmds[][4], int n) {
+  pthread_mutex_lock(&_rssa_q_mutex);
+  bool ok = (_rssa_q_length + n <= RSSA_QLEN);
+  int pos = _rssa_q_length;
+  if (ok) {
+    memcpy(_rssa_queue[pos], cmds, 4 * n);
+    _rssa_q_length += n;
   }
+  pthread_mutex_unlock(&_rssa_q_mutex);
 
-  memcpy(_rssa_queue[_rssa_q_length++], cmd, 4);
+  if (!ok)
+    LOG(RSSA_LOG,LOG_ERR, "Queue overflow, last command ignored!\n");
+  else
+    LOG(RSSA_LOG,LOG_DEBUG, "Added to message queue, position %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",pos,cmds[0][0],cmds[0][1],cmds[0][2],cmds[0][3]);
+  return ok;
+}
 
-  LOG(RSSA_LOG,LOG_DEBUG, "Added to message queue, position %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length-1,_rssa_queue[_rssa_q_length-1][0],_rssa_queue[_rssa_q_length-1][1],_rssa_queue[_rssa_q_length-1][2],_rssa_queue[_rssa_q_length-1][3]);
-  return true;
+bool push_rssa_cmd(unsigned char *cmd) {
+  return push_rssa_cmds((unsigned char (*)[4])cmd, 1);
+}
+
+// Pop the head of a queue into _rssa_out. Caller holds the lock.
+static unsigned char *pop_rssa(unsigned char q[][4], int *length) {
+  memcpy(_rssa_out, q[0], 4);
+  (*length)--;
+  memmove(&q[0], &q[1], 4 * (*length));
+  return _rssa_out;
 }
 
 unsigned char *get_rssa_cmd(unsigned char source_message_type) {
-
-  _rssa_last_was_queue = false;
 
 //startInlineSerialDebug();
 
@@ -71,33 +92,32 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
     return rssa_null; // Only send command on status messages.
   else  {
+    unsigned char *cmd = NULL;
+    int left = 0;
+    pthread_mutex_lock(&_rssa_q_mutex);
     if (_rssa_q_length > 0) {
-      LOG(RSSA_LOG,LOG_DEBUG, "Pull from message queue, length %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length,_rssa_queue[0][0],_rssa_queue[0][1],_rssa_queue[0][2],_rssa_queue[0][3]);
-      _rssa_last_was_queue = true;
-      return _rssa_queue[0];
-    }   
+      cmd = pop_rssa(_rssa_queue, &_rssa_q_length);
+      left = _rssa_q_length;
+    }
+    pthread_mutex_unlock(&_rssa_q_mutex);
+
+    if (cmd != NULL) {
+      LOG(RSSA_LOG,LOG_DEBUG, "Pull from queue, %d left 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",left,cmd[0],cmd[1],cmd[2],cmd[3]);
+      return cmd;
+    }
   }
 
   return rssa_null;
 }
 
+// get_rssa_cmd already popped what it handed out, under the queue lock.
 void remove_rssa_cmd() {
-
-//stopInlineDebug();
-
-  if (_rssa_q_length > 0 && _rssa_last_was_queue == true) {
-    LOG(RSSA_LOG,LOG_DEBUG, "Remove from message queue, length %d\n",_rssa_q_length-1);
-    memmove(&_rssa_queue[0], &_rssa_queue[1], (sizeof(unsigned char) * 4) * _rssa_q_length);
-    _rssa_q_length--;
-  }
 }
 
 void queue_aqualink_rssadapter_setpoint(unsigned char typeID, int val) {
-  unsigned char readySP[] = {0x00,0x01,typeID,0x35};
-  unsigned char setSP[] = {0x00,0x01,0x00,(unsigned char)val};
-
-  push_rssa_cmd(readySP);
-  push_rssa_cmd(setSP);
+  unsigned char pair[2][4] = {{0x00,0x01,typeID,0x35},     // readySP
+                               {0x00,0x01,0x00,(unsigned char)val}}; // setSP, the value
+  push_rssa_cmds(pair, 2);
 }
 
 /* NSF Need to delete this and use aqbuttonp[].rssd_code */

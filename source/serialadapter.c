@@ -165,7 +165,8 @@ static unsigned char *get_rssa_reply_slot_cmd() {
 static void rssa_reply_slot_tick(const unsigned char *packet) {
   if (_rssa_slot_wait == 0)
     return;
-  if (packet[PKT_CMD] == RSSA_REPLY_MSG && packet[4] == 0x02 && packet[7] == _rssa_slot_cmd[3]) {
+  if (packet[PKT_CMD] == RSSA_REPLY_MSG && packet[4] == 0x02 && packet[7] == _rssa_slot_cmd[3] && packet[6] == 0x00 &&
+      packet[5] == (_rssa_slot_cmd[2] == RS_SA_ON ? 0x01 : 0x00)) {
     _rssa_slot_wait = 0;
     _rssa_slot_acked++;
     LOG(RSSA_LOG,LOG_NOTICE, "Reply slot: 0x%02hhx acknowledged (%d of %d)\n", _rssa_slot_cmd[3], _rssa_slot_acked, _rssa_slot_sent);
@@ -174,15 +175,18 @@ static void rssa_reply_slot_tick(const unsigned char *packet) {
   if (--_rssa_slot_wait > 0)
     return;
   _aqconfig_.rssa_send_on_reply = false;
-  bool superseded = false;
+  bool superseded = false, requeued = false;
   pthread_mutex_lock(&_rssa_q_mutex);
   for (int i = 0; i < _rssa_q_length && !superseded; i++)
     superseded = (is_vbutton_set_cmd(_rssa_queue[i]) && _rssa_queue[i][3] == _rssa_slot_cmd[3]);
-  if (!superseded && _rssa_q_length < RSSA_QLEN)
+  if (!superseded && _rssa_q_length < RSSA_QLEN) {
     memcpy(_rssa_queue[_rssa_q_length++], _rssa_slot_cmd, 4);
+    requeued = true;
+  }
   pthread_mutex_unlock(&_rssa_q_mutex);
   LOG(RSSA_LOG,LOG_ERR, "Reply slot: 0x%02hhx to 0x%02hhx not acknowledged; rssa_send_on_reply turned off, %s\n",
-      _rssa_slot_cmd[2], _rssa_slot_cmd[3], superseded ? "a newer command for it is queued" : "queued again");
+      _rssa_slot_cmd[2], _rssa_slot_cmd[3],
+      superseded ? "a newer command for it is queued" : requeued ? "queued again" : "queue full, command dropped");
 }
 
 unsigned char *get_rssa_cmd(unsigned char source_message_type) {
@@ -222,6 +226,10 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   else  {
     unsigned char *cmd = NULL;
     int left = 0;
+    // While a reply-slot send awaits its reply, hand out nothing from the command queue: a readySP sent now could
+    // have that reply land between it and its 0x07 (which then gets a null).
+    if (source_message_type == CMD_STATUS && _rssa_slot_wait > 0)
+      return rssa_null;
     pthread_mutex_lock(&_rssa_q_mutex);
     if (_rssa_q_length > 0) {
       cmd = pop_rssa(_rssa_queue, &_rssa_q_length);

@@ -144,6 +144,29 @@ int main(void) {
   expect(CMD_STATUS, RS_SA_OFF, 0x2e, "newer OFF goes");
   expect(CMD_STATUS, 0x00, 0x00, "lost ON not re-queued behind it");
 
+  // 11. While a slot send awaits its reply, a status poll hands out nothing (a readySP then could be split from
+  //     its 0x07 by the late reply); after the reply, the setpoint pair goes out intact.
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  rssadapter_device_state(0x2d, RS_SA_ON);
+  queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 102);
+  expect(0x13, RS_SA_ON, 0x2d, "set in slot");
+  expect(CMD_STATUS, 0x00, 0x00, "status poll waits for the slot reply");
+  unsigned char ack2don[] = {0x10,0x02,0x48,0x13,0x02,0x01,0x00,0x2d,0x9d,0x10,0x03};
+  rssa_reply_slot_tick(ack2don);
+  expect(0x13, 0x00, 0x00, "slot never takes a readySP");
+  expect(CMD_STATUS, RS_SA_POOLSP, 0x35, "readySP");
+  expect(0x07, 0x00, 102, "value intact");
+
+  // 12. The slot's acknowledgement must match the state, not just the ID.
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  rssadapter_device_state(0x2d, RS_SA_ON);
+  expect(0x13, RS_SA_ON, 0x2d, "ON in slot");
+  unsigned char ack2doff[] = {0x10,0x02,0x48,0x13,0x02,0x00,0x00,0x2d,0x9d,0x10,0x03};
+  rssa_reply_slot_tick(ack2doff);
+  assert(_rssa_slot_wait == RSSA_SLOT_ACK_PACKETS - 1);   // an OFF reply is not the ON's acknowledgement
+  rssa_reply_slot_tick(ack2don);
+  assert(_rssa_slot_wait == 0 && _aqconfig_.rssa_send_on_reply);
+
   // 6. Overflow: a pair that doesn't fit is refused whole, never half-queued.
   reset();
   for (int i = 0; i < RSSA_QLEN - 1; i++) rssadapter_device_state(0x24, 0x00);

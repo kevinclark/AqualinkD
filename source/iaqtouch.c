@@ -828,6 +828,7 @@ void processPage(struct aqualinkdata *aqdata)
 //#define REQUEST_DEVICES_POLL_COUNT 30 // if _aqconfig_.enable_iaqualink=true then REQUEST_STATUS_POLL_COUNT will be used.
 
 static int _pollCnt;
+static bool _status_due = false; // a status-page press came due and waits for the devices page and an idle RSSA queue
 
 // running through status while programming a lighgt seems to confuse the panel, so let
 // other people reset our poll count.
@@ -1117,20 +1118,21 @@ if not programming && poll packet {
         }
 
         iaqt_queue_cmd(nextPageRequestKey);
+        _status_due = false; // the full cycle reaches the status page itself
       
       } else {
         // Status page, then home, then devices: three page loads during which the panel polls the RS Serial
         // Adapter only every ~2.2 s (measured 2026-11-15). So it is configurable (iaqt_status_poll_count) and, once
         // due, waits until no RS Serial Adapter command is queued.
-        static bool status_due = false;
-        int every = (_aqconfig_.iaqt_status_poll_count > 0 && _aqconfig_.iaqt_status_poll_count < FULL_STATUS_POLL_COUNT) ?
+        // Never more often than stock (each status cycle loads three pages).
+        int every = (_aqconfig_.iaqt_status_poll_count > DEVICE_STATUS_POLL_COUNT && _aqconfig_.iaqt_status_poll_count < FULL_STATUS_POLL_COUNT) ?
                     _aqconfig_.iaqt_status_poll_count : DEVICE_STATUS_POLL_COUNT;
         if (_pollCnt > 0 && _pollCnt % every == 0)
-          status_due = true;
-        if (status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
+          _status_due = true;
+        if (_status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
             !rssa_commands_waiting()) {
           iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
-          status_due = false;
+          _status_due = false;
         }
       }
     } else if (in_programming_mode(aqdata) == true) {
@@ -1139,6 +1141,7 @@ if not programming && poll packet {
       // -5 seems to be too quick for VSP/GPM so using 10
       // This is probably not needed any more, since we grab status quite often now.
       _pollCnt = FULL_STATUS_POLL_COUNT - 10; 
+      _status_due = false;
     }
 #else
     //LOG(IAQT_LOG,LOG_DEBUG, "poll count %d\n",_pollCnt);

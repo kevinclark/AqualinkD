@@ -122,7 +122,9 @@ void set_cfg_parm_to_default(cfgParam *parm) {
           }
         break;
         case CFG_SPECIAL:
-          if (strncasecmp(parm->name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
+          if (strcasecmp(parm->name, CFG_N_mqtt_log_level) == 0) {
+            *(int *)parm->value_ptr = *(int *)parm->default_value;
+          } else if (strncasecmp(parm->name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
             //*(int *)parm->value_ptr = *(int *)parm->default_value;
           } else if (strncasecmp(parm->name, CFG_N_panel_type, strlen(CFG_N_panel_type)) == 0) {
             //setPanelByName(aqdata, cleanwhitespace(value));
@@ -159,6 +161,7 @@ const unsigned char _dcfg_findIDHex = 0xFF;
 const bool          _dcfg_false = false;
 const bool          _dcfg_true = true;
 const int           _dcfg_loglevel = DEFAULT_LOG_LEVEL;
+const int           _dcfg_mqtt_loglevel = LOG_NOTICE;
 
 const char         *_dcfg_web_port = DEFAULT_WEBPORT;
 //const char         *_dcfg_web_port = "80";
@@ -316,6 +319,22 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].name = CFG_N_enable_iaqualink;
   _cfgParams[_numCfgParams].valid_values = CFG_V_BOOL;
   _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_false;
+  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
+
+  _numCfgParams++;
+  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.mqtt_publish_log;
+  _cfgParams[_numCfgParams].value_type = CFG_BOOL;
+  _cfgParams[_numCfgParams].name = CFG_N_mqtt_publish_log;
+  _cfgParams[_numCfgParams].valid_values = CFG_V_BOOL;
+  _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_false;
+  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
+
+  _numCfgParams++;
+  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.mqtt_log_level;
+  _cfgParams[_numCfgParams].value_type = CFG_SPECIAL; // text, like log_level
+  _cfgParams[_numCfgParams].name = CFG_N_mqtt_log_level;
+  _cfgParams[_numCfgParams].valid_values = CFG_V_mqtt_log_level;
+  _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_mqtt_loglevel;
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
   
 #ifndef AQ_MANAGER
@@ -952,7 +971,11 @@ bool setConfigValue(struct aqualinkdata *aqdata, char *param, char *value) {
             *(uint16_t *)_cfgParams[i].value_ptr &= ~_cfgParams[i].mask;
         break;
         case CFG_SPECIAL:
-          if (strncasecmp(param, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
+          if (strcasecmp(_cfgParams[i].name, CFG_N_mqtt_log_level) == 0) {
+            char *v = cleanwhitespace(value);   // valid_values already matched it case-insensitively
+            for (char *c = v; *c; c++) *c = toupper((unsigned char)*c);
+            *(int *)_cfgParams[i].value_ptr = text2elevel(v);
+          } else if (strncasecmp(param, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
             *(int *)_cfgParams[i].value_ptr = text2elevel(cleanwhitespace(value));
           } else if (strncasecmp(param, CFG_N_panel_type, strlen(CFG_N_panel_type)) == 0) {
             setPanelByName(aqdata, cleanwhitespace(value));
@@ -2042,7 +2065,9 @@ void check_print_config (struct aqualinkdata *aqdata)
         LOG(AQUA_LOG,LOG_NOTICE, "%-35s = %s\n", name, (*(uint16_t *)_cfgParams[i].value_ptr & _cfgParams[i].mask) == _cfgParams[i].mask?bool2text(true):bool2text(false));
       break;
       case CFG_SPECIAL:
-        if (strncasecmp(_cfgParams[i].name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
+        if (strcasecmp(_cfgParams[i].name, CFG_N_mqtt_log_level) == 0) {
+          LOG(AQUA_LOG,LOG_NOTICE, "%-35s = %s\n", name, loglevel2cgn_name(_aqconfig_.mqtt_log_level));
+        } else if (strncasecmp(_cfgParams[i].name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
           LOG(AQUA_LOG,LOG_NOTICE, "%-35s = %s\n", name, loglevel2cgn_name(_aqconfig_.log_level));
         } else if (strncasecmp(_cfgParams[i].name, CFG_N_panel_type, strlen(CFG_N_panel_type)) == 0) {
           LOG(AQUA_LOG,LOG_NOTICE, "%-35s = %s\n", name, getPanelString());
@@ -2464,7 +2489,9 @@ bool writeCfg (struct aqualinkdata *aqdata)
           fprintf(fp, "%s=%s\n", _cfgParams[i].name, (*(uint16_t *)_cfgParams[i].value_ptr & _cfgParams[i].mask) == _cfgParams[i].mask? bool2text(true):bool2text(false));
         break;
         case CFG_SPECIAL:
-          if (strncasecmp(_cfgParams[i].name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
+          if (strcasecmp(_cfgParams[i].name, CFG_N_mqtt_log_level) == 0) {
+            fprintf(fp, "%s=%s\n", _cfgParams[i].name, loglevel2cgn_name(_aqconfig_.mqtt_log_level));
+          } else if (strncasecmp(_cfgParams[i].name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
             fprintf(fp, "%s=%s\n", _cfgParams[i].name, loglevel2cgn_name(_aqconfig_.log_level));
           } else if (strncasecmp(_cfgParams[i].name, CFG_N_panel_type, strlen(CFG_N_panel_type)) == 0) {
             fprintf(fp, "%s=%s\n", _cfgParams[i].name, getPanelString());

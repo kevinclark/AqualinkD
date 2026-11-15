@@ -26,9 +26,10 @@ int main(void) {
   int n = 0; while (mqtt_log_pop(out, sizeof out, &dropped)) n++;
   assert(n == 58 && strstr(out, "n 57"));               // 2 lines pushed above + 58 = 60
   LOG(NET_LOG, LOG_NOTICE, "net notice\n");                         // network lines only at ERROR
-  LOG(NET_LOG, LOG_ERR, "net error\n");
-  LOG(AQUA_LOG, LOG_ERR, "over the cap\n");
-  assert(!mqtt_log_pop(out, sizeof out, &dropped));                  // cap reached: nothing more this minute
+  LOG(AQUA_LOG, LOG_WARNING, "capped warning\n");                    // cap reached: below ERROR waits
+  assert(!mqtt_log_pop(out, sizeof out, &dropped));
+  LOG(AQUA_LOG, LOG_ERR, "over the cap\n");                          // ERROR always goes
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "over the cap"));
   printf("waiting for the next minute (rate-cap window)...\n");
   sleep_to_next_minute();
   setLoggingPrms(LOG_DEBUG, false, NULL, NULL);    // INFO/DEBUG reach _LOG now, but must not be queued
@@ -38,6 +39,12 @@ int main(void) {
   LOG(NET_LOG, LOG_INFO, "net info\n"); LOG(NET_LOG, LOG_ERR, "net error 2\n");   // first push of the new minute
   assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "not sent to MQTT (over 60 a minute)"));
   assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "net error 2"));
+  assert(!mqtt_log_pop(out, sizeof out, &dropped));
+  for (int i = 0; i < 5; i++) LOG(AQUA_LOG, LOG_WARNING, "same warning\n");   // repeats collapse
+  LOG(AQUA_LOG, LOG_NOTICE, "different\n");
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "same warning"));
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "repeated 4 more times"));
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "different"));
   assert(!mqtt_log_pop(out, sizeof out, &dropped));
   mqtt_log_enable(true, LOG_INFO);                  // mqtt_log_level INFO: INFO goes, DEBUG doesn't
   LOG(AQUA_LOG, LOG_INFO, "info at info level\n");
@@ -55,7 +62,7 @@ int main(void) {
   assert(!mqtt_log_pop(out, sizeof out, &dropped));
   mqtt_log_enable(true, LOG_NOTICE);
   pthread_t t[3]; for (int i = 0; i < 3; i++) pthread_create(&t[i], NULL, spam, NULL);
-  int popped = 0; for (int k = 0; k < 200000; k++) if (mqtt_log_pop(out, sizeof out, &dropped)) { popped++; assert(strstr(out, "thread line")); }
+  int popped = 0; for (int k = 0; k < 200000; k++) if (mqtt_log_pop(out, sizeof out, &dropped)) { popped++; assert(strstr(out, "thread line") || strstr(out, "repeated") || strstr(out, "not sent")); }
   for (int i = 0; i < 3; i++) pthread_join(t[i], NULL);
   while (mqtt_log_pop(out, sizeof out, &dropped)) popped++;
   printf("threaded: %d popped\nPASS\n", popped);

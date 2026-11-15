@@ -2316,7 +2316,7 @@ static void publish_mqtt_log(struct mg_mgr *mgr) {
   for (int i = 0; i < 10 && mqtt_log_pop(line, LOGBUFFER, &dropped); i++) {
     if (dropped > 0) {
       char note[96];
-      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines dropped while MQTT was down", dropped);
+      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines dropped (MQTT down, queue full or busy)", dropped);
       struct mg_mqtt_opts d = {.topic = mg_str(topic), .message = mg_str(note), .qos = 0, .retain = false};
       mg_mqtt_pub(mq, &d);
     }
@@ -2332,8 +2332,6 @@ void *net_services_thread( void *ptr )
 #ifdef DEBUG_SET_IF_CHANGED
   uint noupdate=0;
 #endif
-
-  mqtt_log_enable(_aqconfig_.mqtt_publish_log, _aqconfig_.mqtt_log_level);
 
   if (!_start_net_services(&_mgr, aqdata)) {
     //LOG(NET_LOG,LOG_ERR, "Failed to start network services\n");
@@ -2424,6 +2422,8 @@ bool start_net_services(struct aqualinkdata *aqdata)
 
   LOG(NET_LOG,LOG_NOTICE, "Starting network services thread\n");
 
+  // Before the thread starts, so start-up lines from main ("Listening to Aqualink ...") are queued too.
+  mqtt_log_enable(_aqconfig_.mqtt_publish_log, _aqconfig_.mqtt_log_level);
   if( pthread_create( &_net_thread_id , NULL ,  net_services_thread, (void*)aqdata) < 0) {
     LOG(NET_LOG, LOG_ERR, "could not create network thread\n");
     return false;

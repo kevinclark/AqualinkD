@@ -625,8 +625,10 @@ void LOG(const logmask_t from, const int msg_level, const char * format, ...)
 // it reconnects (older ones are counted as dropped). Rules:
 // - Network-service lines (NET_LOG) go only at ERROR: the rest are mostly about the MQTT connection itself, and at
 //   DEBUG each published line echoes back from the broker and is logged again (a loop).
-// - At most MQTT_LOG_PER_MIN lines a minute (a silent bus logs a warning a second); the excess is counted and
-//   reported in one line when the next minute starts.
+// - A line identical to the previous one is counted, not queued, and reported as "repeated N times" with the next
+//   different line (a silent bus logs the same warning every second).
+// - At most MQTT_LOG_PER_MIN lines a minute below ERROR; the excess is counted and reported in one line on the first
+//   push of a later minute. ERROR lines always go.
 // - Never waits for the lock: a line that would have to wait is dropped and counted (no thread, the serial one
 //   included, ever blocks on logging, and a signal handler logging mid-push can't deadlock).
 #define MQTT_LOG_LINES 64
@@ -644,13 +646,26 @@ void mqtt_log_enable(bool enable, int max_level) {
 
 static void mqtt_log_ring_put(const char *line);
 
-static void mqtt_log_push(const char *line) {
+static void mqtt_log_push(const char *line, int msg_level) {
   static time_t window = 0;
-  static int in_window = 0, suppressed = 0;
+  static int in_window = 0, suppressed = 0, repeats = 0;
+  static char last[LOGBUFFER] = "";
   if (pthread_mutex_trylock(&_mqtt_log_mutex) != 0) {
     __atomic_add_fetch(&_mqtt_log_dropped, 1, __ATOMIC_RELAXED);
     return;
   }
+  if (strncmp(line, last, LOGBUFFER - 1) == 0) {
+    repeats++;
+    pthread_mutex_unlock(&_mqtt_log_mutex);
+    return;
+  }
+  if (repeats > 0) {
+    char note[96];
+    snprintf(note, sizeof(note), "Notice:  AqualinkD: previous line repeated %d more times", repeats);
+    mqtt_log_ring_put(note);
+    repeats = 0;
+  }
+  snprintf(last, sizeof(last), "%s", line);
   time_t now = time(NULL);
   if (now / 60 != window / 60) {
     if (suppressed > 0) {
@@ -660,7 +675,7 @@ static void mqtt_log_push(const char *line) {
     }
     window = now; in_window = 0; suppressed = 0;
   }
-  if (in_window >= MQTT_LOG_PER_MIN) {
+  if (in_window >= MQTT_LOG_PER_MIN && msg_level > LOG_ERR) {
     suppressed++;
   } else {
     in_window++;
@@ -693,7 +708,7 @@ bool mqtt_log_pop(char *out, int out_len, int *dropped) {
     _mqtt_log_count--;
     got = true;
   }
-  *dropped = __atomic_exchange_n(&_mqtt_log_dropped, 0, __ATOMIC_RELAXED);
+  *dropped = got ? __atomic_exchange_n(&_mqtt_log_dropped, 0, __ATOMIC_RELAXED) : 0;
   pthread_mutex_unlock(&_mqtt_log_mutex);
   return got;
 }
@@ -770,7 +785,7 @@ void _LOG(logmask_t from, int msg_level, char *message, int message_buffer_size)
   memcpy(message, strLevel, strlen(strLevel));
 
   if (_mqtt_log_enabled && msg_level <= _mqtt_log_level && (from != NET_LOG || msg_level <= LOG_ERR))
-    mqtt_log_push(message);
+    mqtt_log_push(message, msg_level);
   //len = strlen(message); 
   /*
   if ( message[len-1] != '\n') {

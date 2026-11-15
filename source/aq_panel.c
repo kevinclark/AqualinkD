@@ -28,6 +28,7 @@
 #include "allbutton_aq_programmer.h"
 #include "rs_msg_utils.h"
 #include "iaqualink.h"
+#include "iaqtouch_aq_programmer.h"
 #include "color_lights.h"
 
 
@@ -1445,9 +1446,12 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
     return false;
   }
 
-  if ((button->led->state == OFF && isON == false) ||
+  // A button with an iAQ Touch on/off still pending must take the new intent even if the LED already matches it,
+  // or a later request is dropped against the stale LED and the pending (older) one wins.
+  if (!iaqt_onoff_pending(button) &&
+      ((button->led->state == OFF && isON == false) ||
       (isON > 0 && (button->led->state == ON || button->led->state == FLASH ||
-                     button->led->state == ENABLE))) {
+                     button->led->state == ENABLE)))) {
     LOG(PANL_LOG, LOG_INFO, "received '%s' for '%s', already '%s', Ignoring\n", (isON == false ? "OFF" : "ON"), button->name, (isON == false ? "OFF" : "ON"));
     return false;
   }
@@ -1531,7 +1535,11 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
             //LOG(PANL_LOG, LOG_NOTICE, "********** USE iaqualink2 ********\n");
             set_iaqualink_aux_state(button, isON);
           } else {
-            aq_programmer(AQ_SET_IAQTOUCH_DEVICE_ON_OFF, button, (isON == false ? OFF : ON), deviceIndex, aqdata);
+            // One sweep thread presses every pending button; only start one if none is queued or running.
+            if (iaqt_onoff_request(button, isON))
+              aq_programmer(AQ_SET_IAQTOUCH_DEVICE_ON_OFF, button, (isON == false ? OFF : ON), deviceIndex, aqdata);
+            else
+              LOG(PANL_LOG, LOG_INFO, "'%s' %s added to the running iAQ Touch on/off sweep\n", button->name, isON?"ON":"OFF");
             set_pre_state = false;
           }
         } else if (isONET_ENABLED){

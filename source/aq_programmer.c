@@ -829,6 +829,10 @@ void waitForSingleThreadOrTerminate(struct programmingThreadCtrl *threadCtrl, pr
     LOG(PROG_LOG, LOG_ERR, "Thread (%s) %p timeout waiting for thread (%s) %p to finish\n",
                 ptypeName(type), &threadCtrl->thread_id, ptypeName(threadCtrl->aqdata->active_thread.ptype),
                 threadCtrl->aqdata->active_thread.thread_id);
+    // An on/off sweep that never started leaves its intents parked with no thread to press them; drop them now
+    // rather than have a much later request press them.
+    if (type == AQ_SET_IAQTOUCH_DEVICE_ON_OFF)
+      iaqt_onoff_abandon(threadCtrl->aqdata, "sweep thread timed out waiting for another programming thread");
     free(threadCtrl);
     pthread_exit(0);
   }

@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
 
 #include "iaqtouch_aq_programmer.h"
 #include "aq_serial.h"
@@ -493,80 +494,224 @@ bool goto_iaqt_page(const unsigned char pageID, struct aqualinkdata *aqdata) {
 
 
 #ifdef NEW_AQ_PROGRAMMER
+/*
+ * iAQ Touch on/off for device-page buttons, coalesced and checked at press time.
+ *
+ * The keypress on a device page is a TOGGLE. The old thread pressed it unconditionally, one thread per request,
+ * after setDeviceState had checked the LED at enqueue time; each thread took 7-16 s (HOME -> device pages ->
+ * press -> HOME twice), so a second request queued behind a first was checked against a stale LED and inverted
+ * the button when it finally pressed.
+ *
+ * Now each request records the latest intent per button (iaqt_pending). One sweep thread walks the device pages
+ * once, presses only buttons whose page state differs from the latest intent, and returns HOME once. Keycodes repeat
+ * across device pages (e.g. a landscape circuit on Devices #3 shares its code with Spa or Filter Pump on #1), so a
+ * key is only sent while the page it was looked up on is still the current page.
+ */
+#define IAQT_PENDING_NONE 0
+#define IAQT_PENDING_ON   1
+#define IAQT_PENDING_OFF  2
+#define IAQT_SWEEP_STALE_SEC 180    // longer than waitForSingleThreadOrTerminate's ~121 s wait
+#define IAQT_SWEEP_IDLE_ROUNDS 3    // rounds in a row that press nothing before giving up on what is left
+
+static pthread_mutex_t _iaqt_pending_mutex = PTHREAD_MUTEX_INITIALIZER;
+static time_t _iaqt_sweep_heartbeat = 0; // monotonic seconds; 0 = no sweep thread queued or running
+
+static time_t iaqt_now()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + 1; // never 0
+}
+
+bool iaqt_onoff_request(aqkey *button, bool isON)
+{
+  time_t now = iaqt_now();
+  pthread_mutex_lock(&_iaqt_pending_mutex);
+  button->iaqt_pending = isON ? IAQT_PENDING_ON : IAQT_PENDING_OFF;
+  bool start = (_iaqt_sweep_heartbeat == 0 || now - _iaqt_sweep_heartbeat > IAQT_SWEEP_STALE_SEC);
+  if (start)
+    _iaqt_sweep_heartbeat = now;
+  pthread_mutex_unlock(&_iaqt_pending_mutex);
+  return start;
+}
+
+static int iaqt_peek_pending(aqkey *button)
+{
+  pthread_mutex_lock(&_iaqt_pending_mutex);
+  int want = button->iaqt_pending;
+  pthread_mutex_unlock(&_iaqt_pending_mutex);
+  return want;
+}
+
+bool iaqt_onoff_pending(aqkey *button)
+{
+  return iaqt_peek_pending(button) != IAQT_PENDING_NONE;
+}
+
+// Clear an intent once it is satisfied, unless a newer, different one arrived meanwhile.
+static void iaqt_done_pending(aqkey *button, int want)
+{
+  pthread_mutex_lock(&_iaqt_pending_mutex);
+  if (button->iaqt_pending == want)
+    button->iaqt_pending = IAQT_PENDING_NONE;
+  _iaqt_sweep_heartbeat = iaqt_now();
+  pthread_mutex_unlock(&_iaqt_pending_mutex);
+}
+
+// Any intent still waiting? With finish=true and nothing waiting, marks the sweep finished in the same critical
+// section, so a request arriving afterwards starts a new sweep instead of being stranded.
+static bool iaqt_any_pending(struct aqualinkdata *aqdata, bool finish)
+{
+  bool found = false;
+  pthread_mutex_lock(&_iaqt_pending_mutex);
+  for (int i = 0; i < aqdata->total_buttons && !found; i++)
+    found = (aqdata->aqbuttons[i].iaqt_pending != IAQT_PENDING_NONE);
+  _iaqt_sweep_heartbeat = (finish && !found) ? 0 : iaqt_now();
+  pthread_mutex_unlock(&_iaqt_pending_mutex);
+  return found;
+}
+
+// Drop every waiting intent and mark the sweep finished. Also called when a sweep thread times out before it starts.
+void iaqt_onoff_abandon(struct aqualinkdata *aqdata, const char *reason)
+{
+  pthread_mutex_lock(&_iaqt_pending_mutex);
+  for (int i = 0; i < aqdata->total_buttons; i++) {
+    if (aqdata->aqbuttons[i].iaqt_pending != IAQT_PENDING_NONE) {
+      LOG(IAQT_LOG, LOG_ERR, "IAQ Touch on/off for '%s' dropped: %s\n", aqdata->aqbuttons[i].label, reason);
+      aqdata->aqbuttons[i].iaqt_pending = IAQT_PENDING_NONE;
+    }
+  }
+  _iaqt_sweep_heartbeat = 0;
+  pthread_mutex_unlock(&_iaqt_pending_mutex);
+}
+
+static bool iaqt_is_device_page(unsigned char page)
+{
+  return (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES2 || page == IAQ_PAGE_DEVICES3 || page == IAQ_PAGE_DEVICES_REV_Yg);
+}
+
+// Press every pending button shown on the current device page whose page state differs from its latest intent.
+// Returns how many intents it settled (pressed or found already right); stops at the first sign the page moved.
+static int iaqt_press_pending_on_page(struct aqualinkdata *aqdata, bool *disturbed)
+{
+  int settled = 0;
+  const unsigned char page = iaqtCurrentPage();
+  *disturbed = false;
+  if (!iaqt_is_device_page(page)) {
+    *disturbed = true;
+    return 0;
+  }
+
+  for (int i = 0; i < aqdata->total_buttons; i++) {
+    aqkey *button = &aqdata->aqbuttons[i];
+    int want = iaqt_peek_pending(button);
+    if (want == IAQT_PENDING_NONE)
+      continue;
+
+    struct iaqt_page_button *pButton = iaqtFindButtonByLabel(button->label);
+    if (pButton == NULL && isVBUTTON_ALTLABEL(button->special_mask))
+      pButton = iaqtFindButtonByLabel(((altlabel_detail *)button->special_mask_ptr)->altlabel);
+    if (pButton == NULL)
+      continue; // on another page
+
+    bool want_on = (want == IAQT_PENDING_ON);
+    bool is_on = (pButton->state != 0x00); // 0 off, 1 on, 2 flash, 3 enable, >3 dimmer %
+    if (is_on == want_on) {
+      LOG(IAQT_LOG, LOG_NOTICE, "'%s' already %s at press time, not pressing\n", button->label, want_on?"ON":"OFF");
+      iaqt_done_pending(button, want);
+      settled++;
+      continue;
+    }
+
+    // Keycodes repeat across device pages: never send one unless the page it came from is still showing.
+    // (A page load in progress sets the current page to NUL, so this also catches a page that is leaving.)
+    if (iaqtCurrentPage() != page) {
+      LOG(IAQT_LOG, LOG_WARNING, "Device page changed before pressing '%s', leaving it for the next round\n", button->label);
+      *disturbed = true;
+      break;
+    }
+
+    LOG(IAQT_LOG, LOG_NOTICE, "Pressing '%s' to turn it %s\n", button->label, want_on?"ON":"OFF");
+    send_aqt_cmd(pButton->keycode);
+    // Let the panel answer with the button's new state before the next key.
+    waitfor_iaqt_messages(aqdata, 1);
+    iaqt_done_pending(button, want);
+    settled++;
+
+    // A popup (e.g. a spa safety-delay message) or a page change means this page's keys no longer apply.
+    if (iaqtLastMsg() == CMD_IAQ_MSG_LONG || iaqtCurrentPage() != page) {
+      LOG(IAQT_LOG, LOG_NOTICE, "Popup or page change after pressing '%s', finishing this page later\n", button->label);
+      *disturbed = true;
+      break;
+    }
+  }
+  return settled;
+}
+
 void *set_aqualink_iaqtouch_device_on_off( void *ptr )
 {
   struct programmingThreadCtrl *threadCtrl;
   threadCtrl = (struct programmingThreadCtrl *) ptr;
   struct aqualinkdata *aqdata = threadCtrl->aqdata;
-  //char *buf = (char*)threadCtrl->thread_args;
-  //char device_name[15];
-  struct iaqt_page_button *pButton;
-
-  //unsigned int device = atoi(&buf[0]);
-  //unsigned int state = atoi(&buf[5]);
-  
-  struct programmerArgs *pargs = &threadCtrl->pArgs;
   aqkey *button = threadCtrl->pArgs.button;
-  //unsigned char code = pargs->button->code;
-  int state = pargs->value;
+  int state = threadCtrl->pArgs.value;
+
+  // The PDA iAQ Touch path starts one thread per request without setDeviceState's intent; record it (latest wins).
+  // On RS panels the intent is always recorded before the thread is started, so never overwrite it here.
+  if (isPDA_PANEL)
+    iaqt_onoff_request(button, state == ON);
 
   waitForSingleThreadOrTerminate(threadCtrl, AQ_SET_IAQTOUCH_DEVICE_ON_OFF);
 
-  LOG(IAQT_LOG,LOG_INFO, "PDA Device On/Off, device '%s', state %d\n",button->label,state);
+  LOG(IAQT_LOG,LOG_INFO, "Device On/Off sweep, started by '%s', state %d\n",button->label,state);
 
-  // See if it's on the current page
-  pButton = iaqtFindButtonByLabel(button->label);
-  
-  if (pButton == NULL && isVBUTTON_ALTLABEL(button->special_mask) ) { // Try alt button name
-    pButton = iaqtFindButtonByLabel(((altlabel_detail *)button->special_mask_ptr)->altlabel);
-  }
-
-  if (pButton == NULL) {
-    // No luck, go to the device page
-    if ( goto_iaqt_page(IAQ_PAGE_DEVICES, aqdata) == false )
-      goto f_end;
-
-    pButton = iaqtFindButtonByLabel(button->label);
-
-    if (pButton == NULL && isVBUTTON_ALTLABEL(button->special_mask) ) { // Try alt button name
-      pButton = iaqtFindButtonByLabel(((altlabel_detail *)button->special_mask_ptr)->altlabel);
+  int idle_rounds = 0;
+  for (int round = 0; iaqt_any_pending(aqdata, true); round++) {
+    if (idle_rounds >= IAQT_SWEEP_IDLE_ROUNDS) {
+      iaqt_onoff_abandon(aqdata, "not found on any device page, or the pages would not load");
+      break;
     }
- 
-  // If not found, keep advancing through further device pages while each one says it has more.
-  // Bounded to match _devicePageButtons' 3 known pages (this page + 2 more), so a
-  // misbehaving/wrapping page sequence can't spin this loop forever.
-    for (int _devPage = 0; pButton == NULL && _devPage < 2 && iaqtFindButtonByIndex(16)->type == 0x03; _devPage++) {
-      iaqt_queue_cmd(KEY_IAQTCH_NEXT_PAGE);
+    int settled = 0;
+
+    if (iaqt_is_device_page(iaqtCurrentPage())) {
+      // The idle poll may be leaving this page right now; let one message through so a page change shows.
+      if (round == 0)
+        waitfor_iaqt_messages(aqdata, 1);
+    }
+    // Start from the device page we are on; otherwise HOME -> Devices #1.
+    if (!iaqt_is_device_page(iaqtCurrentPage()) && !goto_iaqt_page(IAQ_PAGE_DEVICES, aqdata)) {
+      idle_rounds++;
+      continue;
+    }
+
+    // Walk forward through the device pages. Bounded to the 3 known pages, as before.
+    for (int hop = 0; ; hop++) {
+      bool disturbed;
+      settled += iaqt_press_pending_on_page(aqdata, &disturbed);
+      if (disturbed || !iaqt_any_pending(aqdata, false) || hop >= 2 || !iaqt_is_device_page(iaqtCurrentPage()))
+        break;
+      struct iaqt_page_button *next = iaqtFindButtonByIndex(16);
+      if (next == NULL || next->type != 0x03)
+        break; // last device page
+      send_aqt_cmd(KEY_IAQTCH_NEXT_PAGE);
       waitfor_iaqt_nextPage(aqdata);
-      pButton = iaqtFindButtonByLabel(button->label);
+    }
+    idle_rounds = (settled > 0) ? 0 : idle_rounds + 1;
+
+    // Anything left is on an earlier page, arrived late, or met a popup: the next round starts again from HOME.
+    if (iaqt_any_pending(aqdata, false)) {
+      send_aqt_cmd(KEY_IAQTCH_HOME);
+      waitfor_iaqt_nextPage(aqdata);
     }
   }
 
-  if (pButton == NULL) {  
-    LOG(IAQT_LOG, LOG_ERR, "IAQ Touch did not find '%s' button on device list\n", button->label);
-    goto f_end;
+  // One trip HOME also clears any popup a press raised. (The old code sent HOME, then goto_iaqt_page(HOME) sent it
+  // again before the first had loaded: two HOME page loads, ~3.5 s per press.)
+  if (iaqtCurrentPage() != IAQ_PAGE_HOME) {
+    send_aqt_cmd(KEY_IAQTCH_HOME);
+    waitfor_iaqt_nextPage(aqdata);
   }
 
-  send_aqt_cmd(pButton->keycode);
-  //LOG(IAQT_LOG, LOG_ERR, "******* CURRENT MENU '0x%02hhx' *****\n",iaqtCurrentPage());
-  // NSF NEED TO CHECK FOR POPUP MESSAGE, AND KILL IT.
-  //page IAQ_PAGE_SET_TEMP hit button 0
-  //page IAQ_PAGE_COLOR_LIGHT hit button ???????
-  // Heater popup can be cleared with a home button and still turn on.
-  // Color light can be cleared with a home button, but won;t turn on.
-
-  waitfor_iaqt_queue2empty();
-  //waitfor_iaqt_messages(aqdata,1);
-
-  // OR maybe use waitfor_iaqt_messages(aqdata,1)
-
-  // Turn spa on when pump off, ned to remove message "spa will turn on after safty delay", home doesn't clear.
-  send_aqt_cmd(KEY_IAQTCH_HOME);
-
-  // Turn spa off need to read message if heater is on AND hit ok......
-
-  f_end:
-  goto_iaqt_page(IAQ_PAGE_HOME, aqdata);
   cleanAndTerminateThread(threadCtrl);
 
   // just stop compiler error, ptr is not valid as it's just been freed

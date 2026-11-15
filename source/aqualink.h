@@ -108,6 +108,7 @@ typedef struct aqualinkkey
   uint8_t special_mask;
   void *special_mask_ptr;
   uint32_t runtime_sec;
+  uint8_t iaqt_pending; // iAQ Touch on/off intent waiting for the sweep thread (IAQT_PENDING_*), guarded by its mutex
 } aqkey;
 
 

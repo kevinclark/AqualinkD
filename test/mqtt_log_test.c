@@ -6,9 +6,13 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include "../source/utils.h"
+#include <time.h>
+#include <unistd.h>
+static void sleep_to_next_minute(void) { time_t t = time(NULL); sleep(60 - (int)(t % 60) + 1); }
 static void *spam(void *a) { for (int i = 0; i < 20000; i++) LOG(AQUA_LOG, LOG_NOTICE, "thread line %d\n", i); return NULL; }
 int main(void) {
   char out[300]; int dropped;
+  if (time(NULL) % 60 > 50) sleep_to_next_minute();   // keep the rate-cap checks inside one minute
   setLoggingPrms(LOG_NOTICE, false, NULL, NULL);
   mqtt_log_enable(true, LOG_NOTICE);
   LOG(AQUA_LOG, LOG_NOTICE, "first %d\n", 1);
@@ -18,13 +22,22 @@ int main(void) {
   assert(out[strlen(out)-1] != '\n');
   assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "an error"));
   assert(!mqtt_log_pop(out, sizeof out, &dropped));
-  for (int i = 0; i < 100; i++) LOG(AQUA_LOG, LOG_NOTICE, "n %d\n", i);
-  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "n 36") && dropped == 36);
-  int n = 1; while (mqtt_log_pop(out, sizeof out, &dropped)) n++;
-  assert(n == 64 && strstr(out, "n 99"));
+  for (int i = 0; i < 100; i++) LOG(AQUA_LOG, LOG_NOTICE, "n %d\n", i);   // rate cap: 60 a minute (3 used above)
+  int n = 0; while (mqtt_log_pop(out, sizeof out, &dropped)) n++;
+  assert(n == 58 && strstr(out, "n 57"));               // 2 lines pushed above + 58 = 60
+  LOG(NET_LOG, LOG_NOTICE, "net notice\n");                         // network lines only at ERROR
+  LOG(NET_LOG, LOG_ERR, "net error\n");
+  LOG(AQUA_LOG, LOG_ERR, "over the cap\n");
+  assert(!mqtt_log_pop(out, sizeof out, &dropped));                  // cap reached: nothing more this minute
+  printf("waiting for the next minute (rate-cap window)...\n");
+  sleep_to_next_minute();
   setLoggingPrms(LOG_DEBUG, false, NULL, NULL);    // INFO/DEBUG reach _LOG now, but must not be queued
   LOG(AQUA_LOG, LOG_INFO, "info at debug level\n");
   LOG(AQUA_LOG, LOG_DEBUG, "debug line\n");
+  assert(!mqtt_log_pop(out, sizeof out, &dropped));
+  LOG(NET_LOG, LOG_INFO, "net info\n"); LOG(NET_LOG, LOG_ERR, "net error 2\n");   // first push of the new minute
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "not sent to MQTT (over 60 a minute)"));
+  assert(mqtt_log_pop(out, sizeof out, &dropped) && strstr(out, "net error 2"));
   assert(!mqtt_log_pop(out, sizeof out, &dropped));
   mqtt_log_enable(true, LOG_INFO);                  // mqtt_log_level INFO: INFO goes, DEBUG doesn't
   LOG(AQUA_LOG, LOG_INFO, "info at info level\n");

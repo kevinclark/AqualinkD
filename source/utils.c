@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <syslog.h>
 #include <pthread.h>
+#include <time.h>
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -619,10 +620,17 @@ void LOG(const logmask_t from, const int msg_level, const char * format, ...)
 }
 
 
-// MQTT log queue (mqtt_publish_log): a ring of the newest MQTT_LOG_LINES lines at NOTICE or more severe, filled
+// MQTT log queue (mqtt_publish_log, mqtt_log_level): a ring of the newest MQTT_LOG_LINES qualifying lines, filled
 // from any thread by _LOG and drained by the network thread, so lines logged while MQTT is down still go out once
-// it reconnects (older ones are counted as dropped).
+// it reconnects (older ones are counted as dropped). Rules:
+// - Network-service lines (NET_LOG) go only at ERROR: the rest are mostly about the MQTT connection itself, and at
+//   DEBUG each published line echoes back from the broker and is logged again (a loop).
+// - At most MQTT_LOG_PER_MIN lines a minute (a silent bus logs a warning a second); the excess is counted and
+//   reported in one line when the next minute starts.
+// - Never waits for the lock: a line that would have to wait is dropped and counted (no thread, the serial one
+//   included, ever blocks on logging, and a signal handler logging mid-push can't deadlock).
 #define MQTT_LOG_LINES 64
+#define MQTT_LOG_PER_MIN 60
 static char _mqtt_log_ring[MQTT_LOG_LINES][LOGBUFFER];
 static int _mqtt_log_head = 0, _mqtt_log_count = 0, _mqtt_log_dropped = 0;
 static bool _mqtt_log_enabled = false;
@@ -634,12 +642,39 @@ void mqtt_log_enable(bool enable, int max_level) {
   _mqtt_log_enabled = enable;
 }
 
+static void mqtt_log_ring_put(const char *line);
+
 static void mqtt_log_push(const char *line) {
-  pthread_mutex_lock(&_mqtt_log_mutex);
+  static time_t window = 0;
+  static int in_window = 0, suppressed = 0;
+  if (pthread_mutex_trylock(&_mqtt_log_mutex) != 0) {
+    __atomic_add_fetch(&_mqtt_log_dropped, 1, __ATOMIC_RELAXED);
+    return;
+  }
+  time_t now = time(NULL);
+  if (now / 60 != window / 60) {
+    if (suppressed > 0) {
+      char note[96];
+      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines not sent to MQTT (over %d a minute)", suppressed, MQTT_LOG_PER_MIN);
+      mqtt_log_ring_put(note);
+    }
+    window = now; in_window = 0; suppressed = 0;
+  }
+  if (in_window >= MQTT_LOG_PER_MIN) {
+    suppressed++;
+  } else {
+    in_window++;
+    mqtt_log_ring_put(line);
+  }
+  pthread_mutex_unlock(&_mqtt_log_mutex);
+}
+
+// Caller holds _mqtt_log_mutex.
+static void mqtt_log_ring_put(const char *line) {
   int slot = (_mqtt_log_head + _mqtt_log_count) % MQTT_LOG_LINES;
   if (_mqtt_log_count == MQTT_LOG_LINES) {        // full: overwrite the oldest
     _mqtt_log_head = (_mqtt_log_head + 1) % MQTT_LOG_LINES;
-    _mqtt_log_dropped++;
+    __atomic_add_fetch(&_mqtt_log_dropped, 1, __ATOMIC_RELAXED);
   } else {
     _mqtt_log_count++;
   }
@@ -647,7 +682,6 @@ static void mqtt_log_push(const char *line) {
   size_t n = strlen(_mqtt_log_ring[slot]);
   while (n > 0 && (_mqtt_log_ring[slot][n-1] == '\n' || _mqtt_log_ring[slot][n-1] == ' '))
     _mqtt_log_ring[slot][--n] = '\0';
-  pthread_mutex_unlock(&_mqtt_log_mutex);
 }
 
 bool mqtt_log_pop(char *out, int out_len, int *dropped) {
@@ -659,8 +693,7 @@ bool mqtt_log_pop(char *out, int out_len, int *dropped) {
     _mqtt_log_count--;
     got = true;
   }
-  *dropped = _mqtt_log_dropped;
-  _mqtt_log_dropped = 0;
+  *dropped = __atomic_exchange_n(&_mqtt_log_dropped, 0, __ATOMIC_RELAXED);
   pthread_mutex_unlock(&_mqtt_log_mutex);
   return got;
 }
@@ -736,7 +769,7 @@ void _LOG(logmask_t from, int msg_level, char *message, int message_buffer_size)
   //strncpy(message, strLevel, strlen(strLevel)); // Will give compiler warning, so use memcpy instead
   memcpy(message, strLevel, strlen(strLevel));
 
-  if (_mqtt_log_enabled && msg_level <= _mqtt_log_level)
+  if (_mqtt_log_enabled && msg_level <= _mqtt_log_level && (from != NET_LOG || msg_level <= LOG_ERR))
     mqtt_log_push(message);
   //len = strlen(message); 
   /*

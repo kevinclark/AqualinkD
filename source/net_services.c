@@ -2308,7 +2308,7 @@ static void publish_mqtt_log(struct mg_mgr *mgr) {
   if (!_aqconfig_.mqtt_publish_log || _aqconfig_.mqtt_aq_topic == NULL)
     return;
   for (struct mg_connection *c = mg_next(mgr, NULL); c != NULL; c = mg_next(mgr, c))
-    if ((c->aq_flags & AQ_MG_CON_MQTT) && !(c->aq_flags & AQ_MG_CON_MQTT_CONNECTING))
+    if ((c->aq_flags & AQ_MG_CON_MQTT_OPEN) && !c->is_closing) // CONNACK received
       mq = c;
   if (mq == NULL)
     return;

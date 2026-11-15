@@ -1449,7 +1449,7 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
   // A button with an iAQ Touch on/off still pending must take the new intent even if the LED already matches it,
   // or a later request is dropped against the stale LED and the pending (older) one wins.
   // Absolute RS Serial Adapter on/off is idempotent, so always send it (the LED may be stale after a restart).
-  bool rssa_direct = (isVBUTTON(button->special_mask) && button->rssa_id != 0 && isRSSA_ENABLED);
+  bool rssa_direct = (isVBUTTON(button->special_mask) && !isPLIGHT(button->special_mask) && button->rssa_id != 0 && isRSSA_ENABLED);
   if (!rssa_direct && !iaqt_onoff_pending(button) &&
       ((button->led->state == OFF && isON == false) ||
       (isON > 0 && (button->led->state == ON || button->led->state == FLASH ||
@@ -1460,7 +1460,8 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
     
   LOG(PANL_LOG, LOG_INFO, "received '%s' for '%s', turning '%s'\n", (isON == false ? "OFF" : "ON"), button->name, (isON == false ? "OFF" : "ON"));
 
-  if ( button->runtime_sec > 0) {
+  // A redundant OFF on a direct RS Serial Adapter button (sent because the set is idempotent) must not arm the runtime timer.
+  if ( button->runtime_sec > 0 && !(rssa_direct && !isON)) {
       LOG(PANL_LOG, LOG_INFO, "'%s' is has runtime %u seconds, setting timer\n", button->name, button->runtime_sec);
       start_timer(aqdata, deviceIndex, 0, button->runtime_sec);
   }

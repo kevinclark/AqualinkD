@@ -87,7 +87,7 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
       LOG(RSSA_LOG,LOG_DEBUG, "Pull from message queue, length %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length,_rssa_queue[0][0],_rssa_queue[0][1],_rssa_queue[0][2],_rssa_queue[0][3]);
       _rssa_last_was_queue = true;
       _rssa_last_was_vbutton_set = ((_rssa_queue[0][2] == RS_SA_ON || _rssa_queue[0][2] == RS_SA_OFF) &&
-                                    _rssa_queue[0][3] >= 0x24 && _rssa_queue[0][3] <= 0x33);
+                                    isRSSA_VBUTTON_ID(_rssa_queue[0][3]));
       return _rssa_queue[0];
     }   
   }
@@ -155,12 +155,26 @@ void set_aqualink_rssadapter_aux_extended_state(const aqkey *button, const unsig
   rssadapter_device_state(button->rssd_code, 0x00); // 0x00 means Get curent state (for color lights the return state is 0)
 }
 
+// Packets (to 0x48) until a second read-back of an ID just switched; ~0.5 s per packet. The first read-back follows the
+// set immediately and can beat the panel applying it.
+#define RSSA_VBUTTON_RECHECK_PACKETS 10
+static volatile int _rssa_vbutton_recheck[256];
+
 // Virtual button on a Remote Power Center with a configured RS Serial Adapter ID (virtual_button_NN_rssaID).
 void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
 {
   LOG(RSSA_LOG,LOG_NOTICE, "Turning '%s' %s with RS Serial Adapter ID 0x%02hhx\n",button->label,(turnOn?"ON":"OFF"),button->rssa_id);
   rssadapter_device_state(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF));
   rssadapter_device_state(button->rssa_id, 0x00); // read the state back
+  _rssa_vbutton_recheck[button->rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS; // and again a few seconds later
+}
+
+static void rssa_vbutton_recheck_tick()
+{
+  for (int id = RSSA_VBUTTON_ID_MIN; id <= RSSA_VBUTTON_ID_MAX; id++) {
+    if (_rssa_vbutton_recheck[id] > 0 && --_rssa_vbutton_recheck[id] == 0)
+      rssadapter_device_state((unsigned char)id, 0x00);
+  }
 }
 
 static void queue_rssa_vbutton_queries(struct aqualinkdata *aqdata)
@@ -301,6 +315,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
   bool rtn = false;
   static int cnt=-5;
   cnt++;
+  rssa_vbutton_recheck_tick();
   //char buff[1024];
   
   //LOG(RSSA_LOG,LOG_DEBUG, " Received message\n");
@@ -441,6 +456,13 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
       }
 
 
+      for (int i = 0; i < aqdata->total_buttons; i++) {
+        if (aqdata->aqbuttons[i].rssa_id == 0 || aqdata->aqbuttons[i].rssa_id != packet[7])
+          continue;
+        if (packet[4] == 0x02 || (packet[6] != 0x00 && packet[6] != 0x01))
+          LOG(RSSA_LOG,LOG_NOTICE, "'%s' RS Serial Adapter reply: type 0x%02hhx st1 0x%02hhx val 0x%02hhx id 0x%02hhx b8 0x%02hhx\n",
+              aqdata->aqbuttons[i].label, packet[4], packet[5], packet[6], packet[7], packet[8]);
+      }
       if (packet[4] == 0x03) { // query reply: state of a virtual button with an RS Serial Adapter ID
         for (int i = 0; i < aqdata->total_buttons; i++) {
           if (aqdata->aqbuttons[i].rssa_id != 0 && aqdata->aqbuttons[i].rssa_id == packet[7]) {

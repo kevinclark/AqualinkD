@@ -12,6 +12,11 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
 
 //void set_aqualink_rssadapter_aux_state(int buttonIndex, bool turnOn);
 void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn);
+
+// RS Serial Adapter device IDs accepted for virtual_button_NN_rssaID: AUX16-31, above the panel's own AUX1-15 (0x15-0x23).
+#define RSSA_VBUTTON_ID_MIN 0x24
+#define RSSA_VBUTTON_ID_MAX 0x33
+#define isRSSA_VBUTTON_ID(id) ((id) >= RSSA_VBUTTON_ID_MIN && (id) <= RSSA_VBUTTON_ID_MAX)
 void set_aqualink_rssadapter_aux_state(const aqkey *button, bool turnOn);
 //void set_aqualink_rssadapter_aux_extended_state(int buttonIndex, const unsigned char state);
 void set_aqualink_rssadapter_aux_extended_state(const aqkey *button, const unsigned char state);

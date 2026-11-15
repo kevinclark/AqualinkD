@@ -44,6 +44,7 @@
 #define CONFIG_C
 #include "rs_devices.h"
 #include "config.h"
+#include "serialadapter.h"
 #include "utils.h"
 #include "aq_serial.h"
 #include "aq_panel.h"
@@ -1282,7 +1283,7 @@ if (strlen(cleanwhitespace(value)) <= 0) {
       unsigned long id = strtoul(value, NULL, 16);
       if (vbutton == NULL) {
         LOG(AQUA_LOG,LOG_ERR, "Config error, could not find vitrual button for `%s`",param);
-      } else if (id < 0x24 || id > 0x33) {
+      } else if (!isRSSA_VBUTTON_ID(id)) {
         LOG(AQUA_LOG,LOG_ERR, "Config error, `%s` must be 0x24-0x33 (RS Serial Adapter AUX16-31), ignored",param);
       } else {
         vbutton->rssa_id = (unsigned char)id;

@@ -316,6 +316,14 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
 
   _numCfgParams++;
+  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.mqtt_publish_log;
+  _cfgParams[_numCfgParams].value_type = CFG_BOOL;
+  _cfgParams[_numCfgParams].name = CFG_N_mqtt_publish_log;
+  _cfgParams[_numCfgParams].valid_values = CFG_V_BOOL;
+  _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_false;
+  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
+
+  _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.rssa_watch_first;
   _cfgParams[_numCfgParams].value_type = CFG_HEX;
   _cfgParams[_numCfgParams].name = CFG_N_rssa_watch_first;

@@ -2298,6 +2298,33 @@ bool _start_net_services(struct mg_mgr *mgr, struct aqualinkdata *aqdata) {
 
 #define JOURNAL_FAIL_RETRY 5
 
+// mqtt_publish_log: send queued log lines to <mqtt_aq_topic>/log on a connected MQTT connection (QoS 0, not retained;
+// a few per poll so a burst can't hold up the loop). Lines wait in utils.c's ring while MQTT is down.
+static void publish_mqtt_log(struct mg_mgr *mgr) {
+  static char topic[256];
+  char line[LOGBUFFER + 64];
+  int dropped = 0;
+  struct mg_connection *mq = NULL;
+  if (!_aqconfig_.mqtt_publish_log || _aqconfig_.mqtt_aq_topic == NULL)
+    return;
+  for (struct mg_connection *c = mg_next(mgr, NULL); c != NULL; c = mg_next(mgr, c))
+    if ((c->aq_flags & AQ_MG_CON_MQTT) && !(c->aq_flags & AQ_MG_CON_MQTT_CONNECTING))
+      mq = c;
+  if (mq == NULL)
+    return;
+  snprintf(topic, sizeof(topic), "%s/log", _aqconfig_.mqtt_aq_topic);
+  for (int i = 0; i < 10 && mqtt_log_pop(line, LOGBUFFER, &dropped); i++) {
+    if (dropped > 0) {
+      char note[96];
+      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines dropped while MQTT was down", dropped);
+      struct mg_mqtt_opts d = {.topic = mg_str(topic), .message = mg_str(note), .qos = 0, .retain = false};
+      mg_mqtt_pub(mq, &d);
+    }
+    struct mg_mqtt_opts o = {.topic = mg_str(topic), .message = mg_str(line), .qos = 0, .retain = false};
+    mg_mqtt_pub(mq, &o);
+  }
+}
+
 void *net_services_thread( void *ptr )
 {
   struct aqualinkdata *aqdata = (struct aqualinkdata *) ptr;
@@ -2305,6 +2332,8 @@ void *net_services_thread( void *ptr )
 #ifdef DEBUG_SET_IF_CHANGED
   uint noupdate=0;
 #endif
+
+  mqtt_log_enable(_aqconfig_.mqtt_publish_log);
 
   if (!_start_net_services(&_mgr, aqdata)) {
     //LOG(NET_LOG,LOG_ERR, "Failed to start network services\n");
@@ -2318,6 +2347,7 @@ void *net_services_thread( void *ptr )
   while (_keepNetServicesRunning == true)
   {
     mg_mgr_poll(&_mgr, (_aqualink_data->simulator_active != SIM_NONE)?10:100);
+    publish_mqtt_log(&_mgr);
 
     if (aqdata->is_dirty == true /*|| _broadcast == true*/) {
       _broadcast_aqualinkstate(_mgr.conns);

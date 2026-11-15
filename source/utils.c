@@ -23,6 +23,7 @@
 #include <string.h>
 #include <signal.h>
 #include <syslog.h>
+#include <pthread.h>
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -618,6 +619,50 @@ void LOG(const logmask_t from, const int msg_level, const char * format, ...)
 }
 
 
+// MQTT log queue (mqtt_publish_log): a ring of the newest MQTT_LOG_LINES lines at NOTICE or more severe, filled
+// from any thread by _LOG and drained by the network thread, so lines logged while MQTT is down still go out once
+// it reconnects (older ones are counted as dropped).
+#define MQTT_LOG_LINES 64
+static char _mqtt_log_ring[MQTT_LOG_LINES][LOGBUFFER];
+static int _mqtt_log_head = 0, _mqtt_log_count = 0, _mqtt_log_dropped = 0;
+static bool _mqtt_log_enabled = false;
+static pthread_mutex_t _mqtt_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void mqtt_log_enable(bool enable) {
+  _mqtt_log_enabled = enable;
+}
+
+static void mqtt_log_push(const char *line) {
+  pthread_mutex_lock(&_mqtt_log_mutex);
+  int slot = (_mqtt_log_head + _mqtt_log_count) % MQTT_LOG_LINES;
+  if (_mqtt_log_count == MQTT_LOG_LINES) {        // full: overwrite the oldest
+    _mqtt_log_head = (_mqtt_log_head + 1) % MQTT_LOG_LINES;
+    _mqtt_log_dropped++;
+  } else {
+    _mqtt_log_count++;
+  }
+  snprintf(_mqtt_log_ring[slot], LOGBUFFER, "%s", line);
+  size_t n = strlen(_mqtt_log_ring[slot]);
+  while (n > 0 && (_mqtt_log_ring[slot][n-1] == '\n' || _mqtt_log_ring[slot][n-1] == ' '))
+    _mqtt_log_ring[slot][--n] = '\0';
+  pthread_mutex_unlock(&_mqtt_log_mutex);
+}
+
+bool mqtt_log_pop(char *out, int out_len, int *dropped) {
+  bool got = false;
+  pthread_mutex_lock(&_mqtt_log_mutex);
+  if (_mqtt_log_count > 0) {
+    snprintf(out, out_len, "%s", _mqtt_log_ring[_mqtt_log_head]);
+    _mqtt_log_head = (_mqtt_log_head + 1) % MQTT_LOG_LINES;
+    _mqtt_log_count--;
+    got = true;
+  }
+  *dropped = _mqtt_log_dropped;
+  _mqtt_log_dropped = 0;
+  pthread_mutex_unlock(&_mqtt_log_mutex);
+  return got;
+}
+
 void _LOG(logmask_t from, int msg_level, char *message, int message_buffer_size)
 {
   /*
@@ -688,6 +733,9 @@ void _LOG(logmask_t from, int msg_level, char *message, int message_buffer_size)
   char *strLevel = elevel2text(msg_level);
   //strncpy(message, strLevel, strlen(strLevel)); // Will give compiler warning, so use memcpy instead
   memcpy(message, strLevel, strlen(strLevel));
+
+  if (_mqtt_log_enabled && msg_level <= LOG_NOTICE)
+    mqtt_log_push(message);
   //len = strlen(message); 
   /*
   if ( message[len-1] != '\n') {

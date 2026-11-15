@@ -221,7 +221,9 @@ void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
 {
   LOG(RSSA_LOG,LOG_NOTICE, "Turning '%s' %s with RS Serial Adapter ID 0x%02hhx\n",button->label,(turnOn?"ON":"OFF"),button->rssa_id);
   rssadapter_device_state(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF));
-  rssadapter_device_state(button->rssa_id, 0x00); // read the state back
+  // Read the state back as a poll, not a command: a room's six sets then go out back to back (one panel poll each,
+  // ~0.5 s) instead of set/read pairs. The set's own reply already carries the new state (see the 0x02 handling).
+  rssadapter_device_poll(button->rssa_id);
   _rssa_vbutton_recheck[button->rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS; // and again a few seconds later
 }
 
@@ -519,11 +521,19 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
           LOG(RSSA_LOG,LOG_NOTICE, "'%s' RS Serial Adapter reply: type 0x%02hhx st1 0x%02hhx val 0x%02hhx id 0x%02hhx b8 0x%02hhx\n",
               aqdata->aqbuttons[i].label, packet[4], packet[5], packet[6], packet[7], packet[8]);
       }
-      if (packet[4] == 0x03) { // query reply: state of a virtual button with an RS Serial Adapter ID
+      // State of a virtual button with an RS Serial Adapter ID: a query reply (type 0x03) carries it in val; a set
+      // reply (type 0x02) echoes the new state in st1 (measured 2026-11-15: 0x01 after every on, 0x00 after every off,
+      // whatever the prior state). The set reply is shown at once; the queued read-back query confirms it.
+      unsigned char vstate = 0xff;
+      if (packet[4] == 0x03)
+        vstate = packet[6];
+      else if (packet[4] == 0x02 && (packet[5] == 0x00 || packet[5] == 0x01))
+        vstate = packet[5];
+      if (vstate != 0xff) {
         for (int i = 0; i < aqdata->total_buttons; i++) {
           if (aqdata->aqbuttons[i].rssa_id != 0 && aqdata->aqbuttons[i].rssa_id == packet[7]) {
-            if (setLEDstate(aqdata->aqbuttons[i].led, packet[6], aqdata)) {
-              LOG(RSSA_LOG,LOG_NOTICE, "'%s' is %s (RS Serial Adapter ID 0x%02hhx)\n", aqdata->aqbuttons[i].label, packet[6]?"ON":"OFF", packet[7]);
+            if (setLEDstate(aqdata->aqbuttons[i].led, vstate, aqdata)) {
+              LOG(RSSA_LOG,LOG_NOTICE, "'%s' is %s (RS Serial Adapter ID 0x%02hhx, %s)\n", aqdata->aqbuttons[i].label, vstate?"ON":"OFF", packet[7], packet[4]==0x02?"set reply":"read-back");
               rtn |= true;
             }
           }

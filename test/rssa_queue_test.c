@@ -29,6 +29,19 @@ int main(void) {
   expect(CMD_STATUS, 0x00, 0x30, "its read-back");
   expect(CMD_STATUS, 0x00, 0x2c, "then polls in order");
 
+  // 1b. A room's virtual button sets go out back to back; their read-backs follow as polls.
+  reset();
+  aqkey b[3] = {{.label="A", .rssa_id=0x2c}, {.label="B", .rssa_id=0x2d}, {.label="C", .rssa_id=0x2e}};
+  rssadapter_device_poll(0x2d);                      // a periodic poll already waiting for B
+  for (int i = 0; i < 3; i++) set_aqualink_rssadapter_vbutton_state(&b[i], true);
+  expect(CMD_STATUS, RS_SA_ON, 0x2c, "set A");
+  expect(CMD_STATUS, RS_SA_ON, 0x2d, "set B");
+  expect(CMD_STATUS, RS_SA_ON, 0x2e, "set C");
+  expect(CMD_STATUS, 0x00, 0x2d, "read-back B (deduped with the waiting poll)");
+  expect(CMD_STATUS, 0x00, 0x2c, "read-back A");
+  expect(CMD_STATUS, 0x00, 0x2e, "read-back C");
+  expect(CMD_STATUS, 0x00, 0x00, "then idle");
+
   // 2. Duplicate polls collapse.
   reset();
   for (int k = 0; k < 3; k++) rssadapter_device_poll(0x31);

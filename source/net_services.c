@@ -2333,7 +2333,7 @@ void *net_services_thread( void *ptr )
   uint noupdate=0;
 #endif
 
-  mqtt_log_enable(_aqconfig_.mqtt_publish_log);
+  mqtt_log_enable(_aqconfig_.mqtt_publish_log, _aqconfig_.mqtt_log_level);
 
   if (!_start_net_services(&_mgr, aqdata)) {
     //LOG(NET_LOG,LOG_ERR, "Failed to start network services\n");

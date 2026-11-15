@@ -626,9 +626,11 @@ void LOG(const logmask_t from, const int msg_level, const char * format, ...)
 static char _mqtt_log_ring[MQTT_LOG_LINES][LOGBUFFER];
 static int _mqtt_log_head = 0, _mqtt_log_count = 0, _mqtt_log_dropped = 0;
 static bool _mqtt_log_enabled = false;
+static int _mqtt_log_level = LOG_NOTICE;
 static pthread_mutex_t _mqtt_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-void mqtt_log_enable(bool enable) {
+void mqtt_log_enable(bool enable, int max_level) {
+  _mqtt_log_level = max_level;
   _mqtt_log_enabled = enable;
 }
 
@@ -734,7 +736,7 @@ void _LOG(logmask_t from, int msg_level, char *message, int message_buffer_size)
   //strncpy(message, strLevel, strlen(strLevel)); // Will give compiler warning, so use memcpy instead
   memcpy(message, strLevel, strlen(strLevel));
 
-  if (_mqtt_log_enabled && msg_level <= LOG_NOTICE)
+  if (_mqtt_log_enabled && msg_level <= _mqtt_log_level)
     mqtt_log_push(message);
   //len = strlen(message); 
   /*

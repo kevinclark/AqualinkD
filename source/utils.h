@@ -111,8 +111,9 @@ const char* loglevel2cgn_name(int level);
 
 //void LOG(int from, int level, char *format, ...);
 void LOG(const logmask_t from, const int msg_level, const char *format, ...);
-// Log lines at NOTICE or more severe, queued for MQTT (mqtt_publish_log). Popped by the network thread.
-void mqtt_log_enable(bool enable);
+// Log lines at max_level or more severe, queued for MQTT (mqtt_publish_log, mqtt_log_level). Popped by the network
+// thread. A line must also pass log_level to reach the queue.
+void mqtt_log_enable(bool enable, int max_level);
 bool mqtt_log_pop(char *out, int out_len, int *dropped);
 void LOG_LARGEMSG(const logmask_t from, const int msg_level, const char * buffer, const int buffer_length);
 

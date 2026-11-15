@@ -18,6 +18,29 @@ int _rssa_q_length = 0;
 bool _rssa_last_was_queue = false;
 //int _rssa_position = 0;
 
+/*
+ * HOUSE PROBE (temporary build, branch probe/rssa-aux): are the Remote Power Center aux circuits addressable as
+ * RS Serial Adapter device IDs above AUX15 (0x23)? Read-only: every probe command is a status QUERY
+ * {0x00,0x01,0x00,id} -- the bytes AqualinkD already sends for AUX12-15 -- built only by rssa_probe_query().
+ * One query at a time, only in reply to a CMD_STATUS with the queue empty, so it is sent at once and never sits
+ * next to a setpoint pair. The packet after each query is logged in full. If the panel answers a query with 0x07
+ * ("send the value now") or a probe, the probe stops for good and the 0x07 gets a null reply, so no query byte is
+ * ever taken as a set value. Two passes after start-up (packet 300 and 900); replies for probe IDs logged at NOTICE
+ * and not applied to any device.
+ */
+static const unsigned char _rssa_probe_ids[] = {0x20,0x21,                         // controls: AUX12/13, known to answer
+                                                0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b, // targets: AUX16-23?
+                                                0x2c,0x2d,0x2e,0x2f,0x30,0x31,0x32,0x33, // targets: AUX24-31?
+                                                0x12,                              // negative control: POOLHT2, blank on RS-16 combo
+                                                0x40};                             // negative control: undocumented
+static int _rssa_probe_next = -1;      // index of the next ID to send; -1 = idle
+static long _rssa_probe_packets = 0;
+static int _rssa_probe_awaiting = -1;  // ID just sent; the next packet to 0x48 is logged in full
+static bool _rssa_probe_stopped = false;
+static bool _rssa_probe_null_07 = false;
+
+static bool rssa_probe_target(unsigned char id) { return id > 0x23 || id == 0x12; }
+
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
 unsigned char rssa_null[]   = {0x00,0x01,0x00,0x00};
 
@@ -65,6 +88,12 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
   if ( source_message_type == 0x07 )
     LOG(RSSA_LOG,LOG_DEBUG, "Replying to 2nd command sequence\n");
+
+  if (source_message_type == 0x07 && _rssa_probe_null_07) {
+    _rssa_probe_null_07 = false;
+    LOG(RSSA_LOG,LOG_ERR, "RSSA probe: answering the panel's 0x07 with a null command\n");
+    return rssa_null;
+  }
 
   if (source_message_type == CMD_PROBE)
     return probe_reply;
@@ -266,36 +295,46 @@ bool setLEDstate( aqled *led, unsigned char state, struct aqualinkdata *aqdata)
   return false;
 }
 
-/*
- * HOUSE PROBE (temporary build, branch probe/rssa-aux): are the Remote Power Center aux circuits addressable as
- * RS Serial Adapter device IDs above AUX15 (0x23)? Read-only: every probe command is a status QUERY
- * {0x00,0x01,0x00,id} -- the same bytes AqualinkD already sends for AUX12-15 -- built only by rssa_probe_query(),
- * which cannot emit 0x80/0x81. Runs by itself twice after start-up (packet 300 and 900), queued a few at a time,
- * and logs every 0x13 reply at NOTICE until packet 1500. Replies for probe IDs above 0x23 are logged and not acted on.
- */
-static const unsigned char _rssa_probe_ids[] = {0x20,0x21,                         // controls: AUX12/13, known to answer
-                                                0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b, // targets: AUX16-23?
-                                                0x2c,0x2d,0x2e,0x2f,0x30,0x31,0x32,0x33, // targets: AUX24-31?
-                                                0x40};                             // negative control
-static int _rssa_probe_next = -1;   // index of the next ID to queue; -1 = idle
-static long _rssa_probe_packets = 0;
-
 static void rssa_probe_query(unsigned char id)
 {
+  if (id == 0x05 || id == 0x35) // never anything that reads as a setpoint type or the "set on next" arm
+    return;
   unsigned char q[] = {0x00, 0x01, 0x00, id}; // 0x00 = query; never a set
-  if (push_rssa_cmd(q))
-    LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: queued status query for 0x%02hhx\n", id);
+  if (push_rssa_cmd(q)) {
+    _rssa_probe_awaiting = id;
+    LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: sent status query 00 01 00 %02hhx\n", id);
+  }
 }
 
-static void rssa_probe_tick()
+// Called for every packet addressed to 0x48, before AqualinkD replies to it.
+static void rssa_probe_tick(unsigned char *packet, int length)
 {
   _rssa_probe_packets++;
+
+  if (_rssa_probe_awaiting >= 0) {
+    char hex[3 * 32 + 1] = {0};
+    for (int i = 0; i < length && i < 32; i++)
+      sprintf(&hex[i * 3], "%02hhx ", packet[i]);
+    LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: after query %02x next packet: %s\n", _rssa_probe_awaiting, hex);
+    if (packet[PKT_CMD] == 0x07 || packet[PKT_CMD] == CMD_PROBE) {
+      LOG(RSSA_LOG, LOG_ERR, "RSSA probe: panel answered query %02x with 0x%02hhx; probe stopped for good\n",
+          _rssa_probe_awaiting, packet[PKT_CMD]);
+      _rssa_probe_stopped = true;
+      _rssa_probe_next = -1;
+      if (packet[PKT_CMD] == 0x07)
+        _rssa_probe_null_07 = true;
+    }
+    _rssa_probe_awaiting = -1;
+    return; // never send a query in reply to the packet that answered the last one
+  }
+
+  if (_rssa_probe_stopped)
+    return;
   if (_rssa_probe_packets == 300 || _rssa_probe_packets == 900) {
     LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: pass starting (%d IDs)\n", (int)sizeof(_rssa_probe_ids));
     _rssa_probe_next = 0;
   }
-  // A few at a time, so normal set/query traffic is never crowded out of the 40-entry queue.
-  while (_rssa_probe_next >= 0 && _rssa_q_length < 4) {
+  if (_rssa_probe_next >= 0 && packet[PKT_CMD] == CMD_STATUS && _rssa_q_length == 0) {
     rssa_probe_query(_rssa_probe_ids[_rssa_probe_next++]);
     if (_rssa_probe_next >= (int)sizeof(_rssa_probe_ids))
       _rssa_probe_next = -1;
@@ -307,7 +346,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
   bool rtn = false;
   static int cnt=-5;
   cnt++;
-  rssa_probe_tick();
+  rssa_probe_tick(packet, length);
   //char buff[1024];
   
   //LOG(RSSA_LOG,LOG_DEBUG, " Received message\n");
@@ -357,7 +396,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
     if (_rssa_probe_packets >= 300 && _rssa_probe_packets <= 1500) {
       LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe reply: len %d | 0x%02hhx 0x%02hhx 0x%02hhx 0x%02hhx 0x%02hhx (type st1 val id b8)\n",
           length, packet[4], packet[5], packet[6], packet[7], packet[8]);
-      if ((packet[4] == 0x03 || packet[4] == 0x02) && packet[7] > 0x23)
+      if ((packet[4] == 0x03 || packet[4] == 0x02) && rssa_probe_target(packet[7]))
         return false; // probe target: logged above, never applied to any device state
     }
     //beautifyPacket(buff, packet, length);

@@ -18,6 +18,25 @@ int _rssa_q_length = 0;
 bool _rssa_last_was_queue = false;
 //int _rssa_position = 0;
 
+/*
+ * HOUSE WATCH (temporary build, branch probe/rssa-watch): maps the Remote Power Center lights to RS Serial Adapter
+ * device IDs. Read-only, same guards as the reviewed probe (a071cde): status QUERIES only {0x00,0x01,0x00,id}, one at a
+ * time, only in reply to a CMD_STATUS with the queue empty (every 2nd such packet), null reply to any 0x07 that follows a
+ * query and the watch stops for good. Cycles 0x24-0x33 forever and logs each ID's value at NOTICE on first read and on
+ * every change. Replies for these IDs are logged and never applied to any device.
+ */
+static const unsigned char _rssa_probe_ids[] = {0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,
+                                                0x2c,0x2d,0x2e,0x2f,0x30,0x31,0x32,0x33};
+static int _rssa_watch_last[256];
+static bool _rssa_watch_init = false;
+static int _rssa_probe_next = 0;       // index of the next ID to send
+static long _rssa_probe_packets = 0;
+static int _rssa_probe_awaiting = -1;  // ID just sent; the next packet to 0x48 is its reply
+static bool _rssa_probe_stopped = false;
+static bool _rssa_probe_null_07 = false;
+
+static bool rssa_probe_target(unsigned char id) { return id >= 0x24 && id <= 0x33; }
+
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
 unsigned char rssa_null[]   = {0x00,0x01,0x00,0x00};
 
@@ -65,6 +84,12 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
   if ( source_message_type == 0x07 )
     LOG(RSSA_LOG,LOG_DEBUG, "Replying to 2nd command sequence\n");
+
+  if (source_message_type == 0x07 && _rssa_probe_null_07) {
+    _rssa_probe_null_07 = false;
+    LOG(RSSA_LOG,LOG_ERR, "RSSA watch: answering the panel's 0x07 with a null command\n");
+    return rssa_null;
+  }
 
   if (source_message_type == CMD_PROBE)
     return probe_reply;
@@ -266,11 +291,62 @@ bool setLEDstate( aqled *led, unsigned char state, struct aqualinkdata *aqdata)
   return false;
 }
 
+static void rssa_probe_query(unsigned char id)
+{
+  if (id == 0x05 || id == 0x35) // never anything that reads as a setpoint type or the "set on next" arm
+    return;
+  unsigned char q[] = {0x00, 0x01, 0x00, id}; // 0x00 = query; never a set
+  if (push_rssa_cmd(q)) {
+    _rssa_probe_awaiting = id;
+    LOG(RSSA_LOG, LOG_DEBUG, "RSSA watch: sent status query 00 01 00 %02hhx\n", id);
+  }
+}
+
+// Called for every packet addressed to 0x48, before AqualinkD replies to it.
+static void rssa_probe_tick(unsigned char *packet, int length)
+{
+  _rssa_probe_packets++;
+  if (!_rssa_watch_init) {
+    for (int i = 0; i < 256; i++) _rssa_watch_last[i] = -1;
+    _rssa_watch_init = true;
+  }
+
+  if (_rssa_probe_awaiting >= 0) {
+    if (packet[PKT_CMD] == 0x07 || packet[PKT_CMD] == CMD_PROBE) {
+      LOG(RSSA_LOG, LOG_ERR, "RSSA watch: panel answered query %02x with 0x%02hhx; watch stopped for good\n",
+          _rssa_probe_awaiting, packet[PKT_CMD]);
+      _rssa_probe_stopped = true;
+      if (packet[PKT_CMD] == 0x07)
+        _rssa_probe_null_07 = true;
+    } else if (packet[PKT_CMD] == 0x13 && packet[4] == 0x03 && packet[7] == _rssa_probe_awaiting) {
+      int v = packet[6];
+      if (_rssa_watch_last[_rssa_probe_awaiting] != v)
+        LOG(RSSA_LOG, LOG_NOTICE, "RSSA watch: 0x%02x = %d (was %d)\n", _rssa_probe_awaiting, v, _rssa_watch_last[_rssa_probe_awaiting]);
+      _rssa_watch_last[_rssa_probe_awaiting] = v;
+    } else {
+      char hex[3 * 32 + 1] = {0};
+      for (int i = 0; i < length && i < 32; i++)
+        sprintf(&hex[i * 3], "%02hhx ", packet[i]);
+      LOG(RSSA_LOG, LOG_NOTICE, "RSSA watch: after query %02x unexpected packet: %s\n", _rssa_probe_awaiting, hex);
+    }
+    _rssa_probe_awaiting = -1;
+    return; // never send a query in reply to the packet that answered the last one
+  }
+
+  if (_rssa_probe_stopped || _rssa_probe_packets < 300)
+    return;
+  if (packet[PKT_CMD] == CMD_STATUS && _rssa_q_length == 0 && (_rssa_probe_packets % 2) == 0) {
+    rssa_probe_query(_rssa_probe_ids[_rssa_probe_next]);
+    _rssa_probe_next = (_rssa_probe_next + 1) % (int)sizeof(_rssa_probe_ids);
+  }
+}
+
 bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualinkdata *aqdata) {
 //RSSA_LOG
   bool rtn = false;
   static int cnt=-5;
   cnt++;
+  rssa_probe_tick(packet, length);
   //char buff[1024];
   
   //LOG(RSSA_LOG,LOG_DEBUG, " Received message\n");
@@ -317,6 +393,8 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
     //debuglogPacket(RSSA_LOG, packet, length, true, true);
     processRSSALEDstate(aqdata, packet);
   } else if (packet[PKT_CMD] == 0x13) {
+    if ((packet[4] == 0x03 || packet[4] == 0x02) && rssa_probe_target(packet[7]))
+      return false; // watched ID: logged by rssa_probe_tick, never applied to any device state
     //beautifyPacket(buff, packet, length);
     //LOG(RSSA_LOG,LOG_DEBUG, "%s", buff);
     //LOG(RSSA_LOG,LOG_DEBUG,"  Command 0x%02hhx = |0x%02hhx|0x%02hhx|0x%02hhx  %d|%d|%d\n", packet[4], packet[5], packet[6], packet[7], packet[5], packet[6], packet[7]);

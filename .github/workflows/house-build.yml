@@ -24,7 +24,9 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
       - name: Build
-        run: make
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          make
       - name: Fingerprint
         run: |
           cd release

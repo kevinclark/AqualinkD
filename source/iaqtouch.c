@@ -23,6 +23,7 @@
 #include "utils.h"
 #include "packetLogger.h"
 #include "iaqtouch.h"
+#include "serialadapter.h"
 #include "iaqtouch_aq_programmer.h"
 #include "iaqualink.h"
 #include "aq_programmer.h"
@@ -1117,9 +1118,20 @@ if not programming && poll packet {
 
         iaqt_queue_cmd(nextPageRequestKey);
       
-      } else if ( (_pollCnt > 0) && (_pollCnt % DEVICE_STATUS_POLL_COUNT == 0) && 
-                  (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) ) {
-        iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
+      } else {
+        // Status page, then home, then devices: three page loads during which the panel polls the RS Serial
+        // Adapter only every ~2.2 s (measured 2026-11-15). So it is configurable (iaqt_status_poll_count) and, once
+        // due, waits until no RS Serial Adapter command is queued.
+        static bool status_due = false;
+        int every = (_aqconfig_.iaqt_status_poll_count > 0 && _aqconfig_.iaqt_status_poll_count < FULL_STATUS_POLL_COUNT) ?
+                    _aqconfig_.iaqt_status_poll_count : DEVICE_STATUS_POLL_COUNT;
+        if (_pollCnt > 0 && _pollCnt % every == 0)
+          status_due = true;
+        if (status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
+            !rssa_commands_waiting()) {
+          iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
+          status_due = false;
+        }
       }
     } else if (in_programming_mode(aqdata) == true) {
       // Set count to something close to max, so we will pull latest info once programming has finished.

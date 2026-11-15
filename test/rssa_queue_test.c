@@ -15,7 +15,7 @@ static void expect(unsigned char src, unsigned char a, unsigned char b, const ch
 static _Atomic int stop = 0;
 static void *pair_pusher(void *a) { while (!stop) queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 77); return NULL; }
 static void *set_pusher(void *a) { while (!stop) { rssadapter_device_state(0x2c, RS_SA_ON); rssadapter_device_poll(0x2d); } return NULL; }
-static void reset(void) { _rssa_q_length = 0; _rssa_poll_length = 0; _rssa_last_was_vbutton_set = false; _rssa_last_was_readysp = false; }
+static void reset(void) { _rssa_q_length = 0; _rssa_poll_length = 0; _rssa_last_was_vbutton_set = false; _rssa_last_was_readysp = false; _rssa_slot_wait = 0; _aqconfig_.rssa_send_on_reply = false; }
 
 int main(void) {
   // 1. A light set queued after a whole poll cycle goes out first; the polls follow one per status message.
@@ -100,6 +100,49 @@ int main(void) {
   expect(CMD_STATUS, 0x00, 80, "value went out on a status");
   expect(0x07, 0x00, 0x00, "late 0x07 gets null");
   expect(CMD_STATUS, RS_SA_OFF, 0x2c, "light set still queued");
+
+  // 8. Reply slot off (default): a 0x13 gets a null and takes nothing.
+  reset();
+  rssadapter_device_state(0x2c, RS_SA_ON);
+  expect(0x13, 0x00, 0x00, "slot off: null");
+  assert(_rssa_q_length == 1);
+
+  // 9. Reply slot on: sets chain through the 0x13 acks; polls and setpoints never go there.
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  rssadapter_device_state(0x2c, RS_SA_ON); rssadapter_device_state(0x2d, RS_SA_ON);
+  rssadapter_device_poll(0x30);
+  expect(CMD_STATUS, RS_SA_ON, 0x2c, "first set on status");
+  unsigned char ack2c[] = {0x10,0x02,0x48,0x13,0x02,0x01,0x00,0x2c,0x9c,0x10,0x03};
+  unsigned char ack2d[] = {0x10,0x02,0x48,0x13,0x02,0x01,0x00,0x2d,0x9d,0x10,0x03};
+  rssa_reply_slot_tick(ack2c);                      // no slot command outstanding yet: no-op
+  expect(0x13, RS_SA_ON, 0x2d, "second set in the reply slot");
+  assert(_rssa_slot_wait == RSSA_SLOT_ACK_PACKETS);
+  expect(0x13, 0x00, 0x00, "nothing more while one is outstanding");
+  rssa_reply_slot_tick(ack2d);
+  assert(_rssa_slot_wait == 0 && _aqconfig_.rssa_send_on_reply);
+  expect(0x13, 0x00, 0x00, "a poll never goes in the slot");
+  expect(CMD_STATUS, 0x00, 0x30, "poll on status");
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 80);
+  expect(0x13, 0x00, 0x00, "a setpoint never goes in the slot");
+  assert(_rssa_q_length == 2);
+
+  // 10. Not acknowledged: after RSSA_SLOT_ACK_PACKETS packets the option turns off and the set is queued again...
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  rssadapter_device_state(0x2e, RS_SA_OFF);
+  expect(0x13, RS_SA_OFF, 0x2e, "set in slot");
+  unsigned char other[] = {0x10,0x02,0x48,0x02,0x10,0x50,0x00,0x00,0x00,0xbc,0x10,0x03};
+  for (int k = 0; k < RSSA_SLOT_ACK_PACKETS; k++) rssa_reply_slot_tick(other);
+  assert(!_aqconfig_.rssa_send_on_reply);
+  expect(CMD_STATUS, RS_SA_OFF, 0x2e, "re-sent on status");
+  // ...unless a newer set for that ID is already queued.
+  reset(); _aqconfig_.rssa_send_on_reply = true;
+  rssadapter_device_state(0x2e, RS_SA_ON);
+  expect(0x13, RS_SA_ON, 0x2e, "ON in slot");
+  rssadapter_device_state(0x2e, RS_SA_OFF);
+  for (int k = 0; k < RSSA_SLOT_ACK_PACKETS; k++) rssa_reply_slot_tick(other);
+  expect(CMD_STATUS, RS_SA_OFF, 0x2e, "newer OFF goes");
+  expect(CMD_STATUS, 0x00, 0x00, "lost ON not re-queued behind it");
 
   // 6. Overflow: a pair that doesn't fit is refused whole, never half-queued.
   reset();

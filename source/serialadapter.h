@@ -3,6 +3,7 @@
 
 
 bool push_rssa_cmd(unsigned char *cmd);
+bool rssa_commands_waiting();
 unsigned char *get_rssa_cmd(unsigned char source_message_type);
 void remove_rssa_cmd();
 bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualinkdata *aq_data);

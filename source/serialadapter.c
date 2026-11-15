@@ -24,6 +24,10 @@ static int _rssa_poll_length = 0;
 static pthread_mutex_t _rssa_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 // get_rssa_cmd pops the entry it hands out into this buffer, so a later push can't change what is sent.
 static unsigned char _rssa_out[4];
+
+static bool is_vbutton_set_cmd(const unsigned char *cmd) {
+  return (cmd[2] == RS_SA_ON || cmd[2] == RS_SA_OFF) && isRSSA_VBUTTON_ID(cmd[3]);
+}
 //int _rssa_position = 0;
 
 // A device set to a virtual button's RS Serial Adapter ID is a single command. If the panel ever answers one with 0x07
@@ -124,6 +128,63 @@ static unsigned char *pop_rssa(unsigned char q[][4], int *length) {
   return _rssa_out;
 }
 
+bool rssa_commands_waiting() {
+  pthread_mutex_lock(&_rssa_q_mutex);
+  bool waiting = (_rssa_q_length > 0);
+  pthread_mutex_unlock(&_rssa_q_mutex);
+  return waiting;
+}
+
+// Reply slot (rssa_send_on_reply): the panel answers each command with a 0x13 message ~50 ms later, before its next
+// status poll (~0.29 s; measured 2026-11-15), and stock AqualinkD acks it with a null. With the option on, a queued
+// virtual button on/off goes out in that ack instead, so a room's sets need not wait one status poll each. Only
+// virtual button sets use it. A set sent there must get its own type 0x02 reply within RSSA_SLOT_ACK_PACKETS
+// packets, or the option turns itself off and the set is queued again (unless a newer one for that ID is queued).
+#define RSSA_REPLY_MSG 0x13
+#define RSSA_SLOT_ACK_PACKETS 4
+static unsigned char _rssa_slot_cmd[4];
+static int _rssa_slot_wait = 0;   // packets left to see the reply to _rssa_slot_cmd; 0 = none outstanding
+static int _rssa_slot_sent = 0, _rssa_slot_acked = 0;
+
+static unsigned char *get_rssa_reply_slot_cmd() {
+  unsigned char *cmd = NULL;
+  pthread_mutex_lock(&_rssa_q_mutex);
+  if (_rssa_q_length > 0 && is_vbutton_set_cmd(_rssa_queue[0]))
+    cmd = pop_rssa(_rssa_queue, &_rssa_q_length);
+  pthread_mutex_unlock(&_rssa_q_mutex);
+  if (cmd != NULL) {
+    memcpy(_rssa_slot_cmd, cmd, 4);
+    _rssa_slot_wait = RSSA_SLOT_ACK_PACKETS;
+    _rssa_slot_sent++;
+    LOG(RSSA_LOG,LOG_NOTICE, "Reply slot: sending 0x%02hhx to 0x%02hhx (%d sent, %d acknowledged)\n", cmd[2], cmd[3], _rssa_slot_sent, _rssa_slot_acked);
+  }
+  return cmd;
+}
+
+// Serial thread, once per packet to the RS Serial Adapter (before the ack is computed).
+static void rssa_reply_slot_tick(const unsigned char *packet) {
+  if (_rssa_slot_wait == 0)
+    return;
+  if (packet[PKT_CMD] == RSSA_REPLY_MSG && packet[4] == 0x02 && packet[7] == _rssa_slot_cmd[3]) {
+    _rssa_slot_wait = 0;
+    _rssa_slot_acked++;
+    LOG(RSSA_LOG,LOG_NOTICE, "Reply slot: 0x%02hhx acknowledged (%d of %d)\n", _rssa_slot_cmd[3], _rssa_slot_acked, _rssa_slot_sent);
+    return;
+  }
+  if (--_rssa_slot_wait > 0)
+    return;
+  _aqconfig_.rssa_send_on_reply = false;
+  bool superseded = false;
+  pthread_mutex_lock(&_rssa_q_mutex);
+  for (int i = 0; i < _rssa_q_length && !superseded; i++)
+    superseded = (is_vbutton_set_cmd(_rssa_queue[i]) && _rssa_queue[i][3] == _rssa_slot_cmd[3]);
+  if (!superseded && _rssa_q_length < RSSA_QLEN)
+    memcpy(_rssa_queue[_rssa_q_length++], _rssa_slot_cmd, 4);
+  pthread_mutex_unlock(&_rssa_q_mutex);
+  LOG(RSSA_LOG,LOG_ERR, "Reply slot: 0x%02hhx to 0x%02hhx not acknowledged; rssa_send_on_reply turned off, %s\n",
+      _rssa_slot_cmd[2], _rssa_slot_cmd[3], superseded ? "a newer command for it is queued" : "queued again");
+}
+
 unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
 //startInlineSerialDebug();
@@ -149,6 +210,13 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
   if (source_message_type == CMD_PROBE)
     return probe_reply;
+  else if (source_message_type == RSSA_REPLY_MSG && _aqconfig_.rssa_send_on_reply && _rssa_slot_wait == 0) {
+    unsigned char *cmd = get_rssa_reply_slot_cmd();
+    if (cmd == NULL)
+      return rssa_null;
+    _rssa_last_was_vbutton_set = true; // a 0x07 after it gets a null, as for any vbutton set
+    return cmd;
+  }
   else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
     return rssa_null; // Only send command on status messages.
   else  {
@@ -166,7 +234,7 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
 
     if (cmd != NULL) {
       LOG(RSSA_LOG,LOG_DEBUG, "Pull from queue, %d left 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",left,cmd[0],cmd[1],cmd[2],cmd[3]);
-      _rssa_last_was_vbutton_set = ((cmd[2] == RS_SA_ON || cmd[2] == RS_SA_OFF) && isRSSA_VBUTTON_ID(cmd[3]));
+      _rssa_last_was_vbutton_set = is_vbutton_set_cmd(cmd);
       _rssa_last_was_readysp = (cmd[3] == 0x35 && cmd[2] != 0x00);
       return cmd;
     }
@@ -390,6 +458,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
   static int cnt=-5;
   cnt++;
   rssa_vbutton_recheck_tick();
+  rssa_reply_slot_tick(packet);
   //char buff[1024];
   
   //LOG(RSSA_LOG,LOG_DEBUG, " Received message\n");

@@ -30,6 +30,9 @@ static unsigned char _rssa_out[4];
 // ("send the value now", the second half of a setpoint), the next queued entry would be taken as a value; answer it
 // with a null command instead. Set by get_rssa_cmd when it hands out such a set.
 static bool _rssa_last_was_vbutton_set = false;
+// The last entry handed out was a setpoint's first half ({..,typeID,0x35}); only then may a 0x07 take the next
+// command as the value. Any other 0x07 gets a null command.
+static bool _rssa_last_was_readysp = false;
 
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
 unsigned char rssa_null[]   = {0x00,0x01,0x00,0x00};
@@ -116,12 +119,18 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   if ( source_message_type == 0x07 )
     LOG(RSSA_LOG,LOG_DEBUG, "Replying to 2nd command sequence\n");
 
+  bool after_readysp = _rssa_last_was_readysp;
+  _rssa_last_was_readysp = false;
   if (source_message_type == 0x07 && _rssa_last_was_vbutton_set) {
     _rssa_last_was_vbutton_set = false;
     LOG(RSSA_LOG,LOG_ERR, "Panel asked for a value after a virtual button on/off; answering with a null command\n");
     return rssa_null;
   }
   _rssa_last_was_vbutton_set = false;
+  if (source_message_type == 0x07 && !after_readysp) {
+    LOG(RSSA_LOG,LOG_ERR, "Panel asked for a value, but the last command sent was not a setpoint; answering with a null command\n");
+    return rssa_null;
+  }
 
   if (source_message_type == CMD_PROBE)
     return probe_reply;
@@ -143,6 +152,7 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
     if (cmd != NULL) {
       LOG(RSSA_LOG,LOG_DEBUG, "Pull from queue, %d left 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",left,cmd[0],cmd[1],cmd[2],cmd[3]);
       _rssa_last_was_vbutton_set = ((cmd[2] == RS_SA_ON || cmd[2] == RS_SA_OFF) && isRSSA_VBUTTON_ID(cmd[3]));
+      _rssa_last_was_readysp = (cmd[3] == 0x35 && cmd[2] != 0x00);
       return cmd;
     }
   }
@@ -319,7 +329,7 @@ void get_aqualink_rssadapter_colorlight_statuses(struct aqualinkdata *aqdata)
   for (int i=0; i < aqdata->num_lights; i++) {
     if (aqdata->lights[i].lightType != LC_PROGRAMABLE ) {
       // LC_PROGRAMABLE is aqualinkd to set, so works as normal button
-      rssadapter_device_state(aqdata->lights[i].button->rssd_code, 0x00); // 0x00 meand Get curent state
+      rssadapter_device_poll(aqdata->lights[i].button->rssd_code); // Get curent state, as a poll
     }
   }
 }

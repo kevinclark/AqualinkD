@@ -15,7 +15,7 @@ static void expect(unsigned char src, unsigned char a, unsigned char b, const ch
 static _Atomic int stop = 0;
 static void *pair_pusher(void *a) { while (!stop) queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 77); return NULL; }
 static void *set_pusher(void *a) { while (!stop) { rssadapter_device_state(0x2c, RS_SA_ON); rssadapter_device_poll(0x2d); } return NULL; }
-static void reset(void) { _rssa_q_length = 0; _rssa_poll_length = 0; _rssa_last_was_vbutton_set = false; }
+static void reset(void) { _rssa_q_length = 0; _rssa_poll_length = 0; _rssa_last_was_vbutton_set = false; _rssa_last_was_readysp = false; }
 
 int main(void) {
   // 1. A light set queued after a whole poll cycle goes out first; the polls follow one per status message.
@@ -57,6 +57,15 @@ int main(void) {
   expect(CMD_STATUS, RS_SA_ON, 0x2d, "set");
   expect(0x07, 0x00, 0x00, "null to 0x07 after set");
   expect(CMD_STATUS, 0x00, 0x2d, "read-back still queued");
+
+  // 5b. A late 0x07 (a status message came between readySP and it) gets a null; queued commands stay.
+  reset();
+  queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 80);
+  rssadapter_device_state(0x2c, RS_SA_OFF);
+  expect(CMD_STATUS, RS_SA_POOLSP, 0x35, "readySP");
+  expect(CMD_STATUS, 0x00, 80, "value went out on a status");
+  expect(0x07, 0x00, 0x00, "late 0x07 gets null");
+  expect(CMD_STATUS, RS_SA_OFF, 0x2c, "light set still queued");
 
   // 6. Overflow: a pair that doesn't fit is refused whole, never half-queued.
   reset();

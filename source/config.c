@@ -982,8 +982,9 @@ bool setConfigValue(struct aqualinkdata *aqdata, char *param, char *value) {
         break;
         case CFG_SPECIAL:
           if (strcasecmp(_cfgParams[i].name, CFG_N_mqtt_log_level) == 0) {
-            int lvl = text2elevel(cleanwhitespace(value));
-            *(int *)_cfgParams[i].value_ptr = (lvl > LOG_DEBUG) ? LOG_DEBUG : lvl; // no serial-debug flood over MQTT
+            char *v = cleanwhitespace(value);   // valid_values already matched it case-insensitively
+            for (char *c = v; *c; c++) *c = toupper((unsigned char)*c);
+            *(int *)_cfgParams[i].value_ptr = text2elevel(v);
           } else if (strncasecmp(param, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
             *(int *)_cfgParams[i].value_ptr = text2elevel(cleanwhitespace(value));
           } else if (strncasecmp(param, CFG_N_panel_type, strlen(CFG_N_panel_type)) == 0) {

@@ -1263,7 +1263,9 @@ int json_cfg_element(char* buffer, int size, const char *name, const void *value
       result = snprintf(buffer, size, ",\"%s\" : {\"value\":\"%s\", \"type\":\"bool\", \"valid values\": %s %s}", name, (*(uint16_t *)value & mask) == mask? bool2text(true):bool2text(false) ,CFG_V_BOOL, adv );
     break;
     case CFG_SPECIAL:
-      if (strncasecmp(name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
+      if (strcasecmp(name, CFG_N_mqtt_log_level) == 0) {
+        result = snprintf(buffer, size, ",\"%s\" : {\"value\":\"%s\", \"type\":\"string\", \"valid values\":%s %s}",name,loglevel2cgn_name(*(int *)value), CFG_V_mqtt_log_level, adv);
+      } else if (strncasecmp(name, CFG_N_log_level, strlen(CFG_N_log_level)) == 0) {
         //fprintf(fp, "%s=%s\n", _cfgParams[i].name, loglevel2cgn_name(_aqconfig_.log_level));
         //result = json_cfg_element(buffer+length, size-length, CFG_N_log_level, &stringptr, CFG_STRING, "[\"DEBUG\", \"INFO\", \"NOTICE\", \"WARNING\", \"ERROR\"]"));
         //stringptr = loglevel2cgn_name(_aqconfig_.log_level);

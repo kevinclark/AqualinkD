@@ -625,10 +625,11 @@ void LOG(const logmask_t from, const int msg_level, const char * format, ...)
 // it reconnects (older ones are counted as dropped). Rules:
 // - Network-service lines (NET_LOG) go only at ERROR: the rest are mostly about the MQTT connection itself, and at
 //   DEBUG each published line echoes back from the broker and is logged again (a loop).
-// - A line identical to the previous one is counted, not queued, and reported as "repeated N times" with the next
-//   different line (a silent bus logs the same warning every second).
-// - At most MQTT_LOG_PER_MIN lines a minute below ERROR; the excess is counted and reported in one line on the first
-//   push of a later minute. ERROR lines always go.
+// - A line identical to the last one sent, within a minute of it, is counted, not queued (a silent bus logs the same
+//   warning every second). The count goes out as "previous line repeated N more times" with the next different
+//   line, or after a minute without one; an identical line a minute or more later is sent again.
+// - At most MQTT_LOG_PER_MIN lines (repeat notes included) a minute below ERROR; the excess is counted and reported
+//   in one line on the first push of a later minute. ERROR lines are never capped.
 // - Never waits for the lock: a line that would have to wait is dropped and counted (no thread, the serial one
 //   included, ever blocks on logging, and a signal handler logging mid-push can't deadlock).
 #define MQTT_LOG_LINES 64
@@ -638,6 +639,12 @@ static int _mqtt_log_head = 0, _mqtt_log_count = 0, _mqtt_log_dropped = 0;
 static bool _mqtt_log_enabled = false;
 static int _mqtt_log_level = LOG_NOTICE;
 static pthread_mutex_t _mqtt_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Repeat and rate state, guarded by _mqtt_log_mutex.
+static time_t _mqtt_log_window = 0, _mqtt_log_last_time = 0;
+static int _mqtt_log_in_window = 0, _mqtt_log_suppressed = 0, _mqtt_log_repeats = 0, _mqtt_log_last_level = LOG_NOTICE;
+static char _mqtt_log_last[LOGBUFFER] = "";
+// Clock for the repeat and rate windows; a host test replaces it.
+time_t (*_mqtt_log_clock)(time_t *) = time;
 
 void mqtt_log_enable(bool enable, int max_level) {
   _mqtt_log_level = max_level;
@@ -646,40 +653,48 @@ void mqtt_log_enable(bool enable, int max_level) {
 
 static void mqtt_log_ring_put(const char *line);
 
+// Queue a line (or a note standing for lines of msg_level) under the per-minute cap. Caller holds _mqtt_log_mutex.
+static void mqtt_log_capped_put(const char *line, int msg_level, time_t now) {
+  if (now / 60 != _mqtt_log_window / 60) {
+    if (_mqtt_log_suppressed > 0) {
+      char note[96];
+      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines not sent to MQTT (over %d a minute)", _mqtt_log_suppressed, MQTT_LOG_PER_MIN);
+      mqtt_log_ring_put(note);
+    }
+    _mqtt_log_window = now; _mqtt_log_in_window = 0; _mqtt_log_suppressed = 0;
+  }
+  if (_mqtt_log_in_window >= MQTT_LOG_PER_MIN && msg_level > LOG_ERR) {
+    _mqtt_log_suppressed++;
+  } else {
+    _mqtt_log_in_window++;
+    mqtt_log_ring_put(line);
+  }
+}
+
+// Send the pending repeat count, if any. Caller holds _mqtt_log_mutex.
+static void mqtt_log_flush_repeats(time_t now) {
+  if (_mqtt_log_repeats == 0)
+    return;
+  char note[96];
+  snprintf(note, sizeof(note), "Notice:  AqualinkD: previous line repeated %d more times", _mqtt_log_repeats);
+  _mqtt_log_repeats = 0;
+  mqtt_log_capped_put(note, _mqtt_log_last_level, now);
+}
+
 static void mqtt_log_push(const char *line, int msg_level) {
-  static time_t window = 0;
-  static int in_window = 0, suppressed = 0, repeats = 0;
-  static char last[LOGBUFFER] = "";
   if (pthread_mutex_trylock(&_mqtt_log_mutex) != 0) {
     __atomic_add_fetch(&_mqtt_log_dropped, 1, __ATOMIC_RELAXED);
     return;
   }
-  if (strncmp(line, last, LOGBUFFER - 1) == 0) {
-    repeats++;
-    pthread_mutex_unlock(&_mqtt_log_mutex);
-    return;
-  }
-  if (repeats > 0) {
-    char note[96];
-    snprintf(note, sizeof(note), "Notice:  AqualinkD: previous line repeated %d more times", repeats);
-    mqtt_log_ring_put(note);
-    repeats = 0;
-  }
-  snprintf(last, sizeof(last), "%s", line);
-  time_t now = time(NULL);
-  if (now / 60 != window / 60) {
-    if (suppressed > 0) {
-      char note[96];
-      snprintf(note, sizeof(note), "Warning: AqualinkD: %d log lines not sent to MQTT (over %d a minute)", suppressed, MQTT_LOG_PER_MIN);
-      mqtt_log_ring_put(note);
-    }
-    window = now; in_window = 0; suppressed = 0;
-  }
-  if (in_window >= MQTT_LOG_PER_MIN && msg_level > LOG_ERR) {
-    suppressed++;
+  time_t now = _mqtt_log_clock(NULL);
+  if (now - _mqtt_log_last_time < 60 && strncmp(line, _mqtt_log_last, LOGBUFFER - 1) == 0) {
+    _mqtt_log_repeats++;
   } else {
-    in_window++;
-    mqtt_log_ring_put(line);
+    mqtt_log_flush_repeats(now);
+    snprintf(_mqtt_log_last, sizeof(_mqtt_log_last), "%s", line);
+    _mqtt_log_last_time = now;
+    _mqtt_log_last_level = msg_level;
+    mqtt_log_capped_put(line, msg_level, now);
   }
   pthread_mutex_unlock(&_mqtt_log_mutex);
 }
@@ -702,6 +717,11 @@ static void mqtt_log_ring_put(const char *line) {
 bool mqtt_log_pop(char *out, int out_len, int *dropped) {
   bool got = false;
   pthread_mutex_lock(&_mqtt_log_mutex);
+  if (_mqtt_log_count == 0 && _mqtt_log_repeats > 0) {   // repeats, then a quiet minute: report the count now
+    time_t now = _mqtt_log_clock(NULL);
+    if (now - _mqtt_log_last_time >= 60)
+      mqtt_log_flush_repeats(now);
+  }
   if (_mqtt_log_count > 0) {
     snprintf(out, out_len, "%s", _mqtt_log_ring[_mqtt_log_head]);
     _mqtt_log_head = (_mqtt_log_head + 1) % MQTT_LOG_LINES;

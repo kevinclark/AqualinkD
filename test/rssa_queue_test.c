@@ -1,5 +1,6 @@
-// Host test of the RS Serial Adapter queue (serialadapter.c): commands go out in order, a setpoint pair stays back
-// to back (also with other threads pushing), overflow never splits it, and a 0x07 takes a value only after a readySP.
+// Host test of the RS Serial Adapter queues (serialadapter.c): commands go out in order ahead of periodic polls,
+// polls go one at a time and never as a setpoint value, a setpoint pair stays back to back (also with other threads
+// pushing), overflow never splits it, and a 0x07 takes a value only after a readySP.
 // Run: test/rssa_queue_test.sh
 #include "../source/serialadapter.c"
 #include <assert.h>
@@ -15,24 +16,36 @@ static void expect(unsigned char src, unsigned char a, unsigned char b, const ch
 }
 static _Atomic int stop = 0;
 static void *pair_pusher(void *a) { while (!stop) queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 77); return NULL; }
-static void *set_pusher(void *a) { while (!stop) { rssadapter_device_state(0x16, RS_SA_ON); rssadapter_device_state(0x17, 0x00); } return NULL; }
-static void reset(void) { _rssa_q_length = 0; _rssa_last_was_readysp = false; }
+static void *set_pusher(void *a) { while (!stop) { rssadapter_device_state(0x16, RS_SA_ON); rssadapter_device_poll(0x17); } return NULL; }
+static void reset(void) { _rssa_q_length = 0; _rssa_poll_length = 0; _rssa_last_was_readysp = false; }
 
 int main(void) {
-  // 1. Commands go out in the order queued, one per status message, and the next comes only after the last is gone.
+  // 1. A command queued after a whole poll cycle goes out first; the polls follow one per status message.
   reset();
+  push_rssa_poll(getPoolSP); push_rssa_poll(getSpaSP);
+  push_rssa_poll(getAux12); push_rssa_poll(getAux13); push_rssa_poll(getAux14); push_rssa_poll(getAux15);
+  assert(_rssa_poll_length == 6);
   rssadapter_device_state(0x16, RS_SA_ON); rssadapter_device_state(0x16, 0x00);
-  expect(CMD_STATUS, RS_SA_ON, 0x16, "first");
-  expect(CMD_STATUS, 0x00, 0x16, "second");
-  expect(CMD_STATUS, 0x00, 0x00, "then null");
+  expect(CMD_STATUS, RS_SA_ON, 0x16, "command before polls");
+  expect(CMD_STATUS, 0x00, 0x16, "its read-back");
+  expect(CMD_STATUS, RS_SA_POOLSP, 0x05, "then polls in order");
+  expect(CMD_STATUS, RS_SA_SPASP, 0x05, "next poll");
 
-  // 3. Setpoint pair with a command arriving between its halves going out: the value follows readySP.
+  // 2. Duplicate polls collapse.
   reset();
+  for (int k = 0; k < 3; k++) rssadapter_device_poll(0x31);
+  assert(_rssa_poll_length == 1);
+
+  // 3. Setpoint pair with polls waiting and a command arriving between its halves going out:
+  //    the value follows readySP; a 0x07 never takes a poll; the other command comes after.
+  reset();
+  rssadapter_device_poll(0x16);
   queue_aqualink_rssadapter_setpoint(RS_SA_POOLSP, 0x16);       // value equal to a device ID on purpose
   expect(CMD_STATUS, RS_SA_POOLSP, 0x35, "readySP");
   rssadapter_device_state(0x17, RS_SA_OFF);                      // arrives between the halves
   expect(0x07, 0x00, 0x16, "value next");
   expect(CMD_STATUS, RS_SA_OFF, 0x17, "command after the pair");
+  expect(CMD_STATUS, 0x00, 0x16, "poll last");
 
   // 3b. A 0x13 reply between readySP and the 0x07 gets a null and does not lose the value.
   reset();
@@ -42,6 +55,12 @@ int main(void) {
   expect(0x13, 0x00, 0x00, "0x13 in between: null");
   expect(0x07, 0x00, 101, "value still follows");
   expect(CMD_STATUS, RS_SA_ON, 0x17, "then the command");
+
+  // 4. A 0x07 with only polls waiting gets a null, not a poll.
+  reset();
+  rssadapter_device_poll(0x16);
+  expect(0x07, 0x00, 0x00, "no poll on 0x07");
+  assert(_rssa_poll_length == 1);
 
   // 5. A 0x07 after an on/off (not a readySP) gets a null and consumes nothing.
   reset();

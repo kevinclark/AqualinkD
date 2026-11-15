@@ -14,9 +14,14 @@
 
 #define RSSA_QLEN 40
 
-// Filled from the network and timer threads and the serial thread itself, drained by the serial thread.
+// Two queues, both filled from the network and timer threads and the serial thread itself, drained by the serial
+// thread: commands (on/off, setpoints, read-backs after a set) in order, and periodic status polls, sent one at a
+// time only when no command is waiting. A poll cycle queues several polls at once; in the command queue they would
+// hold up a command queued just after them by one panel status message each.
 unsigned char _rssa_queue[RSSA_QLEN][4];
 int _rssa_q_length = 0;
+static unsigned char _rssa_poll[RSSA_QLEN][4];
+static int _rssa_poll_length = 0;
 static pthread_mutex_t _rssa_q_mutex = PTHREAD_MUTEX_INITIALIZER;
 // get_rssa_cmd pops the entry it hands out into this buffer, so a later push can't change what is sent.
 static unsigned char _rssa_out[4];
@@ -72,6 +77,21 @@ bool push_rssa_cmd(unsigned char *cmd) {
   return push_rssa_cmds((unsigned char (*)[4])cmd, 1);
 }
 
+// Queue a status poll unless the same one is already waiting.
+static void push_rssa_poll(unsigned char *cmd) {
+  pthread_mutex_lock(&_rssa_q_mutex);
+  bool queued = false;
+  for (int i = 0; i < _rssa_poll_length && !queued; i++)
+    queued = (memcmp(_rssa_poll[i], cmd, 4) == 0);
+  bool full = (!queued && _rssa_poll_length >= RSSA_QLEN);
+  if (!queued && !full)
+    memcpy(_rssa_poll[_rssa_poll_length++], cmd, 4);
+  pthread_mutex_unlock(&_rssa_q_mutex);
+
+  if (full)
+    LOG(RSSA_LOG,LOG_ERR, "Poll queue overflow, poll 0x%02hhx|0x%02hhx ignored!\n", cmd[2], cmd[3]);
+}
+
 // Pop the head of a queue into _rssa_out. Caller holds the lock.
 static unsigned char *pop_rssa(unsigned char q[][4], int *length) {
   memcpy(_rssa_out, q[0], 4);
@@ -114,6 +134,9 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
     if (_rssa_q_length > 0) {
       cmd = pop_rssa(_rssa_queue, &_rssa_q_length);
       left = _rssa_q_length;
+    } else if (source_message_type == CMD_STATUS && _rssa_poll_length > 0) { // never a poll as a setpoint value
+      cmd = pop_rssa(_rssa_poll, &_rssa_poll_length);
+      left = _rssa_poll_length;
     }
     pthread_mutex_unlock(&_rssa_q_mutex);
 
@@ -162,6 +185,11 @@ unsigned char RSSAdevID(int bIndex) {
 void rssadapter_device_state(const unsigned char devID, const unsigned char state) {
   unsigned char setDev[] = {0x00,0x01,state,devID};
   push_rssa_cmd(setDev);
+}
+
+static void rssadapter_device_poll(const unsigned char devID) {
+  unsigned char getDev[] = {0x00,0x01,0x00,devID};
+  push_rssa_poll(getDev);
 }
 /*
 void rssadapter_device_off(unsigned char devID) {
@@ -266,7 +294,7 @@ void get_aqualink_rssadapter_colorlight_statuses(struct aqualinkdata *aqdata)
   for (int i=0; i < aqdata->num_lights; i++) {
     if (aqdata->lights[i].lightType != LC_PROGRAMABLE ) {
       // LC_PROGRAMABLE is aqualinkd to set, so works as normal button
-      rssadapter_device_state(aqdata->lights[i].button->rssd_code, 0x00); // 0x00 meand Get curent state
+      rssadapter_device_poll(aqdata->lights[i].button->rssd_code); // Get curent state, as a poll
     }
   }
 }
@@ -325,18 +353,18 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
       // But do it here as it's the first init, cnt=0 will only happen once  
       queueGetProgramData(RSSADAPTER, aqdata);
     } else {
-      push_rssa_cmd(getPoolSP);
+      push_rssa_poll(getPoolSP);
     
       if (!isSINGLE_DEV_PANEL)
-        push_rssa_cmd(getSpaSP);
+        push_rssa_poll(getSpaSP);
       else
-        push_rssa_cmd(getPoolSP2);
+        push_rssa_poll(getPoolSP2);
  // No status LED's for these, so get them on a poll cycle
       if ( PANEL_SIZE() >= 16 ) {
-        push_rssa_cmd(getAux12);
-        push_rssa_cmd(getAux13);
-        push_rssa_cmd(getAux14);
-        push_rssa_cmd(getAux15);
+        push_rssa_poll(getAux12);
+        push_rssa_poll(getAux13);
+        push_rssa_poll(getAux14);
+        push_rssa_poll(getAux15);
       }
 
     }

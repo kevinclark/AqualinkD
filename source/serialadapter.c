@@ -96,6 +96,21 @@ static void push_rssa_poll(unsigned char *cmd) {
     LOG(RSSA_LOG,LOG_ERR, "Poll queue overflow, poll 0x%02hhx|0x%02hhx ignored!\n", cmd[2], cmd[3]);
 }
 
+// Drop any waiting status poll for this ID (one sent right after a set can read the old state).
+static void drop_rssa_poll(const unsigned char devID) {
+  pthread_mutex_lock(&_rssa_q_mutex);
+  int n = 0;
+  for (int i = 0; i < _rssa_poll_length; i++) {
+    if (_rssa_poll[i][2] == 0x00 && _rssa_poll[i][3] == devID)
+      continue;
+    if (n != i)
+      memcpy(_rssa_poll[n], _rssa_poll[i], 4);
+    n++;
+  }
+  _rssa_poll_length = n;
+  pthread_mutex_unlock(&_rssa_q_mutex);
+}
+
 static void rssadapter_device_poll(const unsigned char devID) {
   unsigned char getDev[] = {0x00,0x01,0x00,devID};
   push_rssa_poll(getDev);
@@ -211,8 +226,8 @@ void set_aqualink_rssadapter_aux_extended_state(const aqkey *button, const unsig
   rssadapter_device_state(button->rssd_code, 0x00); // 0x00 means Get curent state (for color lights the return state is 0)
 }
 
-// Packets (to 0x48) until a second read-back of an ID just switched; ~0.5 s per packet. The first read-back follows the
-// set immediately and can beat the panel applying it.
+// Packets (to 0x48) until the read-back of an ID just switched; ~0.25 s per packet, so ~2.5 s (measured 2026-11-15).
+// A read-back on the very next packet can beat the panel applying the set.
 #define RSSA_VBUTTON_RECHECK_PACKETS 10
 static volatile int _rssa_vbutton_recheck[256];
 
@@ -220,10 +235,11 @@ static volatile int _rssa_vbutton_recheck[256];
 void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
 {
   LOG(RSSA_LOG,LOG_NOTICE, "Turning '%s' %s with RS Serial Adapter ID 0x%02hhx\n",button->label,(turnOn?"ON":"OFF"),button->rssa_id);
+  // Only the set is a command, so a room's sets go out back to back. Its reply carries the new state (see the 0x02
+  // handling); the recheck below reads it back. No immediate read-back: on 3439bd8, 9 of 26 read-backs sent on the
+  // next poll still saw the old state (the change showed only on the recheck ~2.5 s later), which would bounce it.
+  drop_rssa_poll(button->rssa_id);
   rssadapter_device_state(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF));
-  // Read the state back as a poll, not a command: a room's six sets then go out back to back (one panel poll each,
-  // ~0.5 s) instead of set/read pairs. The set's own reply already carries the new state (see the 0x02 handling).
-  rssadapter_device_poll(button->rssa_id);
   _rssa_vbutton_recheck[button->rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS; // and again a few seconds later
 }
 
@@ -527,7 +543,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
       unsigned char vstate = 0xff;
       if (packet[4] == 0x03)
         vstate = packet[6];
-      else if (packet[4] == 0x02 && (packet[5] == 0x00 || packet[5] == 0x01))
+      else if (packet[4] == 0x02 && packet[6] == 0x00 && (packet[5] == 0x00 || packet[5] == 0x01)) // val 0: accepted
         vstate = packet[5];
       if (vstate != 0xff) {
         for (int i = 0; i < aqdata->total_buttons; i++) {

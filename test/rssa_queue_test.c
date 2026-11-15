@@ -29,18 +29,39 @@ int main(void) {
   expect(CMD_STATUS, 0x00, 0x30, "its read-back");
   expect(CMD_STATUS, 0x00, 0x2c, "then polls in order");
 
-  // 1b. A room's virtual button sets go out back to back; their read-backs follow as polls.
+  // 1b. A room's virtual button sets go out back to back; a poll already waiting for one of them is dropped
+  //     (it could read the old state), other polls stay; the recheck reads each light back ~10 packets later.
   reset();
   aqkey b[3] = {{.label="A", .rssa_id=0x2c}, {.label="B", .rssa_id=0x2d}, {.label="C", .rssa_id=0x2e}};
-  rssadapter_device_poll(0x2d);                      // a periodic poll already waiting for B
+  rssadapter_device_poll(0x2d); rssadapter_device_poll(0x30);
   for (int i = 0; i < 3; i++) set_aqualink_rssadapter_vbutton_state(&b[i], true);
   expect(CMD_STATUS, RS_SA_ON, 0x2c, "set A");
   expect(CMD_STATUS, RS_SA_ON, 0x2d, "set B");
   expect(CMD_STATUS, RS_SA_ON, 0x2e, "set C");
-  expect(CMD_STATUS, 0x00, 0x2d, "read-back B (deduped with the waiting poll)");
-  expect(CMD_STATUS, 0x00, 0x2c, "read-back A");
-  expect(CMD_STATUS, 0x00, 0x2e, "read-back C");
-  expect(CMD_STATUS, 0x00, 0x00, "then idle");
+  expect(CMD_STATUS, 0x00, 0x30, "other poll kept, B's dropped");
+  expect(CMD_STATUS, 0x00, 0x00, "no read-back yet");
+  for (int k = 0; k < RSSA_VBUTTON_RECHECK_PACKETS; k++) rssa_vbutton_recheck_tick();
+  expect(CMD_STATUS, 0x00, 0x2c, "recheck A");
+  expect(CMD_STATUS, 0x00, 0x2d, "recheck B");
+  expect(CMD_STATUS, 0x00, 0x2e, "recheck C");
+
+  // 1c. Reply handling: an accepted set reply (type 0x02, st1 = new state, val 0) shows the state at once; a
+  //     refused-looking one (val != 0) and a read-back (type 0x03) behave as before.
+  {
+    static struct aqualinkdata aq; static aqled led[1];
+    memset(&aq, 0, sizeof(aq));
+    aq.total_buttons = 1; aq.aqbuttons[0].rssa_id = 0x2c; aq.aqbuttons[0].label = "A"; aq.aqbuttons[0].led = &led[0];
+    led[0].state = OFF;
+    unsigned char set_on[]  = {0x10,0x02,0x48,0x13,0x02,0x01,0x00,0x2c,0x9c,0x10,0x03};
+    unsigned char refused[] = {0x10,0x02,0x48,0x13,0x02,0x00,0x0e,0x2c,0x9c,0x10,0x03};
+    unsigned char rb_off[]  = {0x10,0x02,0x48,0x13,0x03,0x00,0x00,0x2c,0x9c,0x10,0x03};
+    process_rssadapter_packet(set_on, sizeof(set_on), &aq);
+    if (led[0].state != ON) { printf("FAIL set reply did not show ON\n"); exit(1); }
+    process_rssadapter_packet(refused, sizeof(refused), &aq);
+    if (led[0].state != ON) { printf("FAIL refused-looking reply changed state\n"); exit(1); }
+    process_rssadapter_packet(rb_off, sizeof(rb_off), &aq);
+    if (led[0].state != OFF) { printf("FAIL read-back did not correct to OFF\n"); exit(1); }
+  }
 
   // 2. Duplicate polls collapse.
   reset();

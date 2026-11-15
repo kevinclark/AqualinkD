@@ -266,11 +266,48 @@ bool setLEDstate( aqled *led, unsigned char state, struct aqualinkdata *aqdata)
   return false;
 }
 
+/*
+ * HOUSE PROBE (temporary build, branch probe/rssa-aux): are the Remote Power Center aux circuits addressable as
+ * RS Serial Adapter device IDs above AUX15 (0x23)? Read-only: every probe command is a status QUERY
+ * {0x00,0x01,0x00,id} -- the same bytes AqualinkD already sends for AUX12-15 -- built only by rssa_probe_query(),
+ * which cannot emit 0x80/0x81. Runs by itself twice after start-up (packet 300 and 900), queued a few at a time,
+ * and logs every 0x13 reply at NOTICE until packet 1500. Replies for probe IDs above 0x23 are logged and not acted on.
+ */
+static const unsigned char _rssa_probe_ids[] = {0x20,0x21,                         // controls: AUX12/13, known to answer
+                                                0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b, // targets: AUX16-23?
+                                                0x2c,0x2d,0x2e,0x2f,0x30,0x31,0x32,0x33, // targets: AUX24-31?
+                                                0x40};                             // negative control
+static int _rssa_probe_next = -1;   // index of the next ID to queue; -1 = idle
+static long _rssa_probe_packets = 0;
+
+static void rssa_probe_query(unsigned char id)
+{
+  unsigned char q[] = {0x00, 0x01, 0x00, id}; // 0x00 = query; never a set
+  if (push_rssa_cmd(q))
+    LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: queued status query for 0x%02hhx\n", id);
+}
+
+static void rssa_probe_tick()
+{
+  _rssa_probe_packets++;
+  if (_rssa_probe_packets == 300 || _rssa_probe_packets == 900) {
+    LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe: pass starting (%d IDs)\n", (int)sizeof(_rssa_probe_ids));
+    _rssa_probe_next = 0;
+  }
+  // A few at a time, so normal set/query traffic is never crowded out of the 40-entry queue.
+  while (_rssa_probe_next >= 0 && _rssa_q_length < 4) {
+    rssa_probe_query(_rssa_probe_ids[_rssa_probe_next++]);
+    if (_rssa_probe_next >= (int)sizeof(_rssa_probe_ids))
+      _rssa_probe_next = -1;
+  }
+}
+
 bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualinkdata *aqdata) {
 //RSSA_LOG
   bool rtn = false;
   static int cnt=-5;
   cnt++;
+  rssa_probe_tick();
   //char buff[1024];
   
   //LOG(RSSA_LOG,LOG_DEBUG, " Received message\n");
@@ -317,6 +354,12 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
     //debuglogPacket(RSSA_LOG, packet, length, true, true);
     processRSSALEDstate(aqdata, packet);
   } else if (packet[PKT_CMD] == 0x13) {
+    if (_rssa_probe_packets >= 300 && _rssa_probe_packets <= 1500) {
+      LOG(RSSA_LOG, LOG_NOTICE, "RSSA probe reply: len %d | 0x%02hhx 0x%02hhx 0x%02hhx 0x%02hhx 0x%02hhx (type st1 val id b8)\n",
+          length, packet[4], packet[5], packet[6], packet[7], packet[8]);
+      if ((packet[4] == 0x03 || packet[4] == 0x02) && packet[7] > 0x23)
+        return false; // probe target: logged above, never applied to any device state
+    }
     //beautifyPacket(buff, packet, length);
     //LOG(RSSA_LOG,LOG_DEBUG, "%s", buff);
     //LOG(RSSA_LOG,LOG_DEBUG,"  Command 0x%02hhx = |0x%02hhx|0x%02hhx|0x%02hhx  %d|%d|%d\n", packet[4], packet[5], packet[6], packet[7], packet[5], packet[6], packet[7]);

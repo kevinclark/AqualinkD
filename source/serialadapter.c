@@ -14,15 +14,16 @@
 
 #define RSSA_QLEN 40
 
+// Two queues, both filled from the network/MQTT/timer threads and the serial thread, drained by the serial thread:
+// commands (on/off, setpoints, read-backs) in order, and periodic status polls, sent one at a time only when no
+// command is waiting. A poll cycle queues a dozen polls at once; in the command queue they held a command up ~7 s.
 unsigned char _rssa_queue[RSSA_QLEN][4];
 int _rssa_q_length = 0;
-// The queue is filled from the network/MQTT threads and drained by the serial thread.
+static unsigned char _rssa_poll[RSSA_QLEN][4];
+static int _rssa_poll_length = 0;
 static pthread_mutex_t _rssa_q_mutex = PTHREAD_MUTEX_INITIALIZER;
-// get_rssa_cmd pops the entry it hands out into this buffer, so nothing a later push does can change what is sent.
+// get_rssa_cmd pops the entry it hands out into this buffer, so a later push can't change what is sent.
 static unsigned char _rssa_out[4];
-// The last entry handed out was the first half of a setpoint ({..,typeID,0x35}): the panel will answer 0x07 and
-// take queue[0] as the value, so nothing may be put in front of queue[0] until it has gone out.
-static bool _rssa_awaiting_value = false;
 //int _rssa_position = 0;
 
 // A device set to a virtual button's RS Serial Adapter ID is a single command. If the panel ever answers one with 0x07
@@ -54,55 +55,55 @@ void processRSSALEDstate(struct aqualinkdata *aqdata, unsigned char *packet)
 }
 
 
-bool push_rssa_cmd(unsigned char *cmd) {
+// Append n commands as one unit: all or none, never interleaved with another thread's push. A setpoint's two halves
+// must go out back to back (the panel takes the reply after readySP as the value).
+static bool push_rssa_cmds(unsigned char cmds[][4], int n) {
   pthread_mutex_lock(&_rssa_q_mutex);
-  if (_rssa_q_length >= RSSA_QLEN ) {
-    pthread_mutex_unlock(&_rssa_q_mutex);
+  bool ok = (_rssa_q_length + n <= RSSA_QLEN);
+  int pos = _rssa_q_length;
+  if (ok) {
+    memcpy(_rssa_queue[pos], cmds, 4 * n);
+    _rssa_q_length += n;
+  }
+  pthread_mutex_unlock(&_rssa_q_mutex);
+
+  if (!ok)
     LOG(RSSA_LOG,LOG_ERR, "Queue overflow, last command ignored!\n");
-    return false;
-  }
-
-  memcpy(_rssa_queue[_rssa_q_length++], cmd, 4);
-
-  LOG(RSSA_LOG,LOG_DEBUG, "Added to message queue, position %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length-1,_rssa_queue[_rssa_q_length-1][0],_rssa_queue[_rssa_q_length-1][1],_rssa_queue[_rssa_q_length-1][2],_rssa_queue[_rssa_q_length-1][3]);
-  pthread_mutex_unlock(&_rssa_q_mutex);
-  return true;
+  else
+    LOG(RSSA_LOG,LOG_DEBUG, "Added to message queue, position %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",pos,cmds[0][0],cmds[0][1],cmds[0][2],cmds[0][3]);
+  return ok;
 }
 
-static bool is_vbutton_set(const unsigned char *cmd) {
-  return (cmd[2] == RS_SA_ON || cmd[2] == RS_SA_OFF) && isRSSA_VBUTTON_ID(cmd[3]);
+bool push_rssa_cmd(unsigned char *cmd) {
+  return push_rssa_cmds((unsigned char (*)[4])cmd, 1);
 }
 
-// A virtual button on/off and its read-back go ahead of queued status polls (the ~100-packet poll cycle queues a
-// dozen, ~6 s at the panel's pace). Any older queued on/off for the same ID is dropped, so the latest request wins and
-// a quick ON then OFF can't go out in reverse order. Never splits a setpoint pair.
-static bool push_rssa_vbutton_set_front(unsigned char id, unsigned char state) {
+// Queue a status poll unless the same one is already waiting.
+static void push_rssa_poll(unsigned char *cmd) {
   pthread_mutex_lock(&_rssa_q_mutex);
-  int n = 0;
-  for (int i = 0; i < _rssa_q_length; i++) {
-    if (is_vbutton_set(_rssa_queue[i]) && _rssa_queue[i][3] == id)
-      continue;
-    if (n != i)
-      memcpy(_rssa_queue[n], _rssa_queue[i], 4);
-    n++;
-  }
-  _rssa_q_length = n;
-
-  if (_rssa_q_length + 2 > RSSA_QLEN) {
-    pthread_mutex_unlock(&_rssa_q_mutex);
-    LOG(RSSA_LOG,LOG_ERR, "Queue overflow, virtual button 0x%02hhx command ignored!\n", id);
-    return false;
-  }
-  int pos = (_rssa_awaiting_value && _rssa_q_length > 0) ? 1 : 0;
-  memmove(&_rssa_queue[pos + 2], &_rssa_queue[pos], 4 * (_rssa_q_length - pos));
-  unsigned char set[] = {0x00,0x01,state,id};
-  unsigned char query[] = {0x00,0x01,0x00,id};
-  memcpy(_rssa_queue[pos], set, 4);
-  memcpy(_rssa_queue[pos + 1], query, 4);
-  _rssa_q_length += 2;
-  LOG(RSSA_LOG,LOG_DEBUG, "Virtual button 0x%02hhx 0x%02hhx queued at position %d of %d\n", id, state, pos, _rssa_q_length);
+  bool queued = false;
+  for (int i = 0; i < _rssa_poll_length && !queued; i++)
+    queued = (memcmp(_rssa_poll[i], cmd, 4) == 0);
+  bool full = (!queued && _rssa_poll_length >= RSSA_QLEN);
+  if (!queued && !full)
+    memcpy(_rssa_poll[_rssa_poll_length++], cmd, 4);
   pthread_mutex_unlock(&_rssa_q_mutex);
-  return true;
+
+  if (full)
+    LOG(RSSA_LOG,LOG_ERR, "Poll queue overflow, poll 0x%02hhx|0x%02hhx ignored!\n", cmd[2], cmd[3]);
+}
+
+static void rssadapter_device_poll(const unsigned char devID) {
+  unsigned char getDev[] = {0x00,0x01,0x00,devID};
+  push_rssa_poll(getDev);
+}
+
+// Pop the head of a queue into _rssa_out. Caller holds the lock.
+static unsigned char *pop_rssa(unsigned char q[][4], int *length) {
+  memcpy(_rssa_out, q[0], 4);
+  (*length)--;
+  memmove(&q[0], &q[1], 4 * (*length));
+  return _rssa_out;
 }
 
 unsigned char *get_rssa_cmd(unsigned char source_message_type) {
@@ -127,33 +128,36 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
     return rssa_null; // Only send command on status messages.
   else  {
+    unsigned char *cmd = NULL;
+    int left = 0;
     pthread_mutex_lock(&_rssa_q_mutex);
     if (_rssa_q_length > 0) {
-      LOG(RSSA_LOG,LOG_DEBUG, "Pull from message queue, length %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length,_rssa_queue[0][0],_rssa_queue[0][1],_rssa_queue[0][2],_rssa_queue[0][3]);
-      memcpy(_rssa_out, _rssa_queue[0], 4);
-      _rssa_q_length--;
-      memmove(&_rssa_queue[0], &_rssa_queue[1], 4 * _rssa_q_length);
-      _rssa_awaiting_value = (_rssa_out[3] == 0x35 && _rssa_out[2] != 0x00);
-      _rssa_last_was_vbutton_set = is_vbutton_set(_rssa_out);
-      pthread_mutex_unlock(&_rssa_q_mutex);
-      return _rssa_out;
+      cmd = pop_rssa(_rssa_queue, &_rssa_q_length);
+      left = _rssa_q_length;
+    } else if (source_message_type == CMD_STATUS && _rssa_poll_length > 0) { // never a poll as a setpoint value
+      cmd = pop_rssa(_rssa_poll, &_rssa_poll_length);
+      left = _rssa_poll_length;
     }
     pthread_mutex_unlock(&_rssa_q_mutex);
+
+    if (cmd != NULL) {
+      LOG(RSSA_LOG,LOG_DEBUG, "Pull from queue, %d left 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",left,cmd[0],cmd[1],cmd[2],cmd[3]);
+      _rssa_last_was_vbutton_set = ((cmd[2] == RS_SA_ON || cmd[2] == RS_SA_OFF) && isRSSA_VBUTTON_ID(cmd[3]));
+      return cmd;
+    }
   }
 
   return rssa_null;
 }
 
-// get_rssa_cmd already popped the entry it handed out (under the queue lock); kept for the caller in aqualinkd.c.
+// get_rssa_cmd already popped what it handed out, under the queue lock.
 void remove_rssa_cmd() {
 }
 
 void queue_aqualink_rssadapter_setpoint(unsigned char typeID, int val) {
-  unsigned char readySP[] = {0x00,0x01,typeID,0x35};
-  unsigned char setSP[] = {0x00,0x01,0x00,(unsigned char)val};
-
-  push_rssa_cmd(readySP);
-  push_rssa_cmd(setSP);
+  unsigned char pair[2][4] = {{0x00,0x01,typeID,0x35},     // readySP
+                               {0x00,0x01,0x00,(unsigned char)val}}; // setSP, the value
+  push_rssa_cmds(pair, 2);
 }
 
 /* NSF Need to delete this and use aqbuttonp[].rssd_code */
@@ -206,7 +210,8 @@ static volatile int _rssa_vbutton_recheck[256];
 void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
 {
   LOG(RSSA_LOG,LOG_NOTICE, "Turning '%s' %s with RS Serial Adapter ID 0x%02hhx\n",button->label,(turnOn?"ON":"OFF"),button->rssa_id);
-  push_rssa_vbutton_set_front(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF)); // with a read-back query right after
+  rssadapter_device_state(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF));
+  rssadapter_device_state(button->rssa_id, 0x00); // read the state back
   _rssa_vbutton_recheck[button->rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS; // and again a few seconds later
 }
 
@@ -214,7 +219,7 @@ static void rssa_vbutton_recheck_tick()
 {
   for (int id = RSSA_VBUTTON_ID_MIN; id <= RSSA_VBUTTON_ID_MAX; id++) {
     if (_rssa_vbutton_recheck[id] > 0 && --_rssa_vbutton_recheck[id] == 0)
-      rssadapter_device_state((unsigned char)id, 0x00);
+      rssadapter_device_poll((unsigned char)id);
   }
 }
 
@@ -222,7 +227,7 @@ static void queue_rssa_vbutton_queries(struct aqualinkdata *aqdata)
 {
   for (int i = 0; i < aqdata->total_buttons; i++) {
     if (aqdata->aqbuttons[i].rssa_id != 0)
-      rssadapter_device_state(aqdata->aqbuttons[i].rssa_id, 0x00);
+      rssadapter_device_poll(aqdata->aqbuttons[i].rssa_id);
   }
 }
 
@@ -377,18 +382,18 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
       // But do it here as it's the first init, cnt=0 will only happen once  
       queueGetProgramData(RSSADAPTER, aqdata);
     } else {
-      push_rssa_cmd(getPoolSP);
+      push_rssa_poll(getPoolSP);
     
       if (!isSINGLE_DEV_PANEL)
-        push_rssa_cmd(getSpaSP);
+        push_rssa_poll(getSpaSP);
       else
-        push_rssa_cmd(getPoolSP2);
+        push_rssa_poll(getPoolSP2);
  // No status LED's for these, so get them on a poll cycle
       if ( PANEL_SIZE() >= 16 ) {
-        push_rssa_cmd(getAux12);
-        push_rssa_cmd(getAux13);
-        push_rssa_cmd(getAux14);
-        push_rssa_cmd(getAux15);
+        push_rssa_poll(getAux12);
+        push_rssa_poll(getAux13);
+        push_rssa_poll(getAux14);
+        push_rssa_poll(getAux15);
       }
 
     }

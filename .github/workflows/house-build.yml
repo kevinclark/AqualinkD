@@ -1,0 +1,41 @@
+# Builds AqualinkD for the house Pi (Raspberry Pi CM4, Debian 13 trixie, aarch64) off the Pi:
+# native arm64 runner, inside the same Debian release so glibc and libsystemd match.
+# Output: artifact aqualinkd-<sha> with release/aqualinkd, release/rs485mon and md5.txt.
+# Manual runs can build any ref (e.g. an upstream PR branch) to prove it compiles.
+name: house-build
+on:
+  push:
+    branches: [house]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "git ref to build (default: the branch the run is on)"
+        required: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    steps:
+      - name: Toolchain (same packages the Pi used)
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential libsystemd-dev git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Build
+        run: make
+      - name: Fingerprint
+        run: |
+          cd release
+          md5sum aqualinkd rs485mon | tee md5.txt
+          echo "ref=${{ inputs.ref || github.ref }} sha=$(git -C .. rev-parse HEAD)" | tee -a md5.txt
+          gcc --version | head -1 | tee -a md5.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aqualinkd-${{ github.sha }}${{ inputs.ref && '-dispatch' || '' }}
+          path: |
+            release/aqualinkd
+            release/rs485mon
+            release/md5.txt
+          retention-days: 90

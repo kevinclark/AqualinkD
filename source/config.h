@@ -78,6 +78,8 @@ struct aqconfig
   bool enable_iaqualink;
   bool rssa_send_on_reply;     // also send a queued virtual button on/off in the ack to the panel's 0x13 reply
   int iaqt_status_poll_count;  // iAQ Touch polls between status-page requests; 0 = stock (DEVICE_STATUS_POLL_COUNT)
+  unsigned char rssa_watch_first; // read-only probe: poll RS Serial Adapter IDs first..last (0x24-0x33) and log changes
+  unsigned char rssa_watch_last;
   //bool enable_RS_device_value_print;
   bool deamonize;
 #ifndef AQ_MANAGER // Need to uncomment and clean up referances in future.
@@ -285,6 +287,8 @@ int _numCfgParams;
 #define CFG_N_enable_iaqualink                  "enable_iaqualink"
 #define CFG_N_rssa_send_on_reply                "rssa_send_on_reply"
 #define CFG_N_iaqt_status_poll_count            "iaqt_status_poll_count"
+#define CFG_N_rssa_watch_first                  "rssa_watch_first"
+#define CFG_N_rssa_watch_last                   "rssa_watch_last"
 #define CFG_N_log_file                          "log_file"
 #define CFG_N_mqtt_aq_topic                     "mqtt_aq_topic"
 #define CFG_N_mqtt_server                       "mqtt_address"

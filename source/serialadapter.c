@@ -335,6 +335,29 @@ static void queue_rssa_vbutton_queries(struct aqualinkdata *aqdata)
   }
 }
 
+// Read-only probe (rssa_watch_first/last): status queries only, never a set, limited to the virtual button ID range.
+static bool rssa_watched(unsigned char id) {
+  return _aqconfig_.rssa_watch_first != 0 && isRSSA_VBUTTON_ID(_aqconfig_.rssa_watch_first) &&
+         isRSSA_VBUTTON_ID(_aqconfig_.rssa_watch_last) &&
+         id >= _aqconfig_.rssa_watch_first && id <= _aqconfig_.rssa_watch_last;
+}
+static void queue_rssa_watch_queries() {
+  for (int id = RSSA_VBUTTON_ID_MIN; id <= RSSA_VBUTTON_ID_MAX; id++)
+    if (rssa_watched((unsigned char)id))
+      rssadapter_device_poll((unsigned char)id);
+}
+static void rssa_watch_reply(const unsigned char *packet) {
+  static unsigned char last[256];
+  static bool seen[256];
+  unsigned char id = packet[7], val = packet[6];
+  if (packet[4] != 0x03 || !rssa_watched(id))
+    return;
+  if (!seen[id] || last[id] != val)
+    LOG(RSSA_LOG,LOG_NOTICE, "Watch: ID 0x%02hhx = 0x%02hhx%s\n", id, val, seen[id] ? " (changed)" : " (first read)");
+  seen[id] = true;
+  last[id] = val;
+}
+
 void set_aqualink_rssadapter_aux_state(const aqkey *button, bool turnOn)
 {
   LOG(RSSA_LOG,LOG_DEBUG, "Turning button %s %s\n",button->label,(turnOn?"On":"Off"));
@@ -482,6 +505,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
     // Virtual buttons with an RS Serial Adapter ID have no status LEDs here (the iAQ Touch idle poll never loads
     // their device pages), so read them at start-up and on this poll cycle.
     queue_rssa_vbutton_queries(aqdata);
+    queue_rssa_watch_queries();
     if (cnt == 0) {
       // The below inturn calls get_aqualink_rssadapter_setpoints()
       // But do it here as it's the first init, cnt=0 will only happen once  
@@ -618,6 +642,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
       // reply (type 0x02) echoes the new state in st1 (measured 2026-11-15: 0x01 after every on, 0x00 after every off,
       // whatever the prior state). The set reply is shown at once; the queued read-back query confirms it.
       unsigned char vstate = 0xff;
+      rssa_watch_reply(packet);
       if (packet[4] == 0x03)
         vstate = packet[6];
       else if (packet[4] == 0x02 && packet[6] == 0x00 && (packet[5] == 0x00 || packet[5] == 0x01)) // val 0: accepted

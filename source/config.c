@@ -314,6 +314,20 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].name = CFG_N_iaqt_status_poll_count;
   _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_zero;
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
+
+  _numCfgParams++;
+  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.rssa_watch_first;
+  _cfgParams[_numCfgParams].value_type = CFG_HEX;
+  _cfgParams[_numCfgParams].name = CFG_N_rssa_watch_first;
+  _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_unknownHex;
+  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
+
+  _numCfgParams++;
+  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.rssa_watch_last;
+  _cfgParams[_numCfgParams].value_type = CFG_HEX;
+  _cfgParams[_numCfgParams].name = CFG_N_rssa_watch_last;
+  _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_unknownHex;
+  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
   
 #ifndef AQ_MANAGER
   _numCfgParams++;

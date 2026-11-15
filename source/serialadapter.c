@@ -18,6 +18,11 @@ int _rssa_q_length = 0;
 bool _rssa_last_was_queue = false;
 //int _rssa_position = 0;
 
+// A device set to a virtual button's RS Serial Adapter ID is a single command. If the panel ever answers one with 0x07
+// ("send the value now", the second half of a setpoint), the next queued entry would be taken as a value; answer it
+// with a null command instead. Set by get_rssa_cmd when it hands out such a set.
+static bool _rssa_last_was_vbutton_set = false;
+
 unsigned char probe_reply[] = {0x00,0x01,0x00,0x05};
 unsigned char rssa_null[]   = {0x00,0x01,0x00,0x00};
 
@@ -66,6 +71,13 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
   if ( source_message_type == 0x07 )
     LOG(RSSA_LOG,LOG_DEBUG, "Replying to 2nd command sequence\n");
 
+  if (source_message_type == 0x07 && _rssa_last_was_vbutton_set) {
+    _rssa_last_was_vbutton_set = false;
+    LOG(RSSA_LOG,LOG_ERR, "Panel asked for a value after a virtual button on/off; answering with a null command\n");
+    return rssa_null;
+  }
+  _rssa_last_was_vbutton_set = false;
+
   if (source_message_type == CMD_PROBE)
     return probe_reply;
   else if (source_message_type != CMD_STATUS && source_message_type != 0x07) // 0x07 is second part of set message
@@ -74,6 +86,8 @@ unsigned char *get_rssa_cmd(unsigned char source_message_type) {
     if (_rssa_q_length > 0) {
       LOG(RSSA_LOG,LOG_DEBUG, "Pull from message queue, length %d 0x%02hhx|0x%02hhx|0x%02hhx|0x%02hhx\n",_rssa_q_length,_rssa_queue[0][0],_rssa_queue[0][1],_rssa_queue[0][2],_rssa_queue[0][3]);
       _rssa_last_was_queue = true;
+      _rssa_last_was_vbutton_set = ((_rssa_queue[0][2] == RS_SA_ON || _rssa_queue[0][2] == RS_SA_OFF) &&
+                                    _rssa_queue[0][3] >= 0x24 && _rssa_queue[0][3] <= 0x33);
       return _rssa_queue[0];
     }   
   }
@@ -139,6 +153,22 @@ void set_aqualink_rssadapter_aux_extended_state(const aqkey *button, const unsig
 
   rssadapter_device_state(button->rssd_code, state); // Set state
   rssadapter_device_state(button->rssd_code, 0x00); // 0x00 means Get curent state (for color lights the return state is 0)
+}
+
+// Virtual button on a Remote Power Center with a configured RS Serial Adapter ID (virtual_button_NN_rssaID).
+void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
+{
+  LOG(RSSA_LOG,LOG_NOTICE, "Turning '%s' %s with RS Serial Adapter ID 0x%02hhx\n",button->label,(turnOn?"ON":"OFF"),button->rssa_id);
+  rssadapter_device_state(button->rssa_id, (turnOn?RS_SA_ON:RS_SA_OFF));
+  rssadapter_device_state(button->rssa_id, 0x00); // read the state back
+}
+
+static void queue_rssa_vbutton_queries(struct aqualinkdata *aqdata)
+{
+  for (int i = 0; i < aqdata->total_buttons; i++) {
+    if (aqdata->aqbuttons[i].rssa_id != 0)
+      rssadapter_device_state(aqdata->aqbuttons[i].rssa_id, 0x00);
+  }
 }
 
 void set_aqualink_rssadapter_aux_state(const aqkey *button, bool turnOn)
@@ -283,6 +313,9 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
   if (cnt == 0 || cnt >= 100) {
     LOG(RSSA_LOG,LOG_INFO, "Queue device update requests\n");
 
+    // Virtual buttons with an RS Serial Adapter ID have no status LEDs here (the iAQ Touch idle poll never loads
+    // their device pages), so read them at start-up and on this poll cycle.
+    queue_rssa_vbutton_queries(aqdata);
     if (cnt == 0) {
       // The below inturn calls get_aqualink_rssadapter_setpoints()
       // But do it here as it's the first init, cnt=0 will only happen once  
@@ -407,6 +440,17 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
         }
       }
 
+
+      if (packet[4] == 0x03) { // query reply: state of a virtual button with an RS Serial Adapter ID
+        for (int i = 0; i < aqdata->total_buttons; i++) {
+          if (aqdata->aqbuttons[i].rssa_id != 0 && aqdata->aqbuttons[i].rssa_id == packet[7]) {
+            if (setLEDstate(aqdata->aqbuttons[i].led, packet[6], aqdata)) {
+              LOG(RSSA_LOG,LOG_NOTICE, "'%s' is %s (RS Serial Adapter ID 0x%02hhx)\n", aqdata->aqbuttons[i].label, packet[6]?"ON":"OFF", packet[7]);
+              rtn |= true;
+            }
+          }
+        }
+      }
 
       if (packet[7] == RS_SA_AUX12) {
         LOG(RSSA_LOG,LOG_INFO,"AUX12 %d\n", packet[6]);

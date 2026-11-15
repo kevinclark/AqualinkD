@@ -109,6 +109,7 @@ typedef struct aqualinkkey
   void *special_mask_ptr;
   uint32_t runtime_sec;
   uint8_t iaqt_pending; // iAQ Touch on/off intent waiting for the sweep thread (IAQT_PENDING_*), guarded by its mutex
+  unsigned char rssa_id; // RS Serial Adapter device ID for a virtual button (virtual_button_NN_rssaID), 0 = none
 } aqkey;
 
 

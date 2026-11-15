@@ -1448,7 +1448,9 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
 
   // A button with an iAQ Touch on/off still pending must take the new intent even if the LED already matches it,
   // or a later request is dropped against the stale LED and the pending (older) one wins.
-  if (!iaqt_onoff_pending(button) &&
+  // Absolute RS Serial Adapter on/off is idempotent, so always send it (the LED may be stale after a restart).
+  bool rssa_direct = (isVBUTTON(button->special_mask) && button->rssa_id != 0 && isRSSA_ENABLED);
+  if (!rssa_direct && !iaqt_onoff_pending(button) &&
       ((button->led->state == OFF && isON == false) ||
       (isON > 0 && (button->led->state == ON || button->led->state == FLASH ||
                      button->led->state == ENABLE)))) {
@@ -1527,7 +1529,11 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
     } else if (isVBUTTON(button->special_mask)) {
         // Virtual buttons only supported with Aqualink Touch
         LOG(PANL_LOG, LOG_INFO, "Set state for Virtual Button %s code=0x%02hhx iAqualink2 enabled=%s\n",button->name, button->rssd_code, isIAQT_ENABLED?"Yes":"No");
-        if (isIAQT_ENABLED) {
+        if (rssa_direct) {
+          // Remote Power Center circuit with a known RS Serial Adapter ID: absolute on/off, then read the state back.
+          set_aqualink_rssadapter_vbutton_state(button, isON);
+          set_pre_state = false;
+        } else if (isIAQT_ENABLED) {
           // If it's one of the pre-defined onces & iaqualink is enabled, we can set it easile with button.
           
           if ( isIAQL_ACTIVE && button->rssd_code && button->rssd_code != NUL)

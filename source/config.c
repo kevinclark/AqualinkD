@@ -1274,6 +1274,20 @@ if (strlen(cleanwhitespace(value)) <= 0) {
         LOG(AQUA_LOG,LOG_ERR, "Config error, could not find vitrual button for `%s`",param);
       }
       rtn=true;
+    } else if (strncasecmp(param + 17, "_rssaID", 7) == 0) {
+      // RS Serial Adapter device ID for a virtual button on a Remote Power Center (e.g. 0x2c), so it is switched with
+      // absolute on/off commands and its state is read back, instead of iAQ Touch menu presses. Only the aux range
+      // above the panel's own AUX1-15 (0x15-0x23) is accepted, so a typo cannot alias a real circuit on the main panel.
+      aqkey *vbutton = getVirtualButton(aqdata, num);
+      unsigned long id = strtoul(value, NULL, 16);
+      if (vbutton == NULL) {
+        LOG(AQUA_LOG,LOG_ERR, "Config error, could not find vitrual button for `%s`",param);
+      } else if (id < 0x24 || id > 0x33) {
+        LOG(AQUA_LOG,LOG_ERR, "Config error, `%s` must be 0x24-0x33 (RS Serial Adapter AUX16-31), ignored",param);
+      } else {
+        vbutton->rssa_id = (unsigned char)id;
+      }
+      rtn=true;
     } else if (strncasecmp(param + 17, "_runtime", 8) == 0) {
       aqkey *vbutton = getVirtualButton(aqdata, num);
       if (vbutton != NULL) {
@@ -2483,6 +2497,10 @@ bool writeCfg (struct aqualinkdata *aqdata)
     
     if (isVBUTTON_ALTLABEL(aqdata->aqbuttons[i].special_mask)) {
       fprintf(fp,"%s_altLabel=%s\n", prefix, ((altlabel_detail *)aqdata->aqbuttons[i].special_mask_ptr)->altlabel);
+    }
+
+    if (isVBUTTON(aqdata->aqbuttons[i].special_mask) && aqdata->aqbuttons[i].rssa_id != 0) {
+      fprintf(fp,"%s_rssaID=0x%02hhx\n", prefix, aqdata->aqbuttons[i].rssa_id);
     }
 
     if (aqdata->aqbuttons[i].runtime_sec > 0) {

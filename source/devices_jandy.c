@@ -27,6 +27,7 @@
 #include "aq_mqtt.h"
 #include "packetLogger.h"
 #include "iaqualink.h"
+#include "iaqtouch.h"
 
 #include "json_messages.h"
 /*
@@ -612,6 +613,15 @@ bool processPacketToJandyPump(unsigned char *packet_buffer, int packet_length, s
   if (packet_buffer[3] == CMD_EPUMP_RPM) {
     // All we need to do is set we are interested in next packet, but ca   lling function already did this.
     LOG(DJAN_LOG, LOG_INFO, "ControlPanel request Pump ID 0x%02hhx set RPM to %d\n",packet_buffer[PKT_DEST], ( (packet_buffer[EP_HI_B_RPM-1] * 256) + packet_buffer[EP_LO_B_RPM-1]) / 4 );
+    // The panel re-sends the same speed every ~11 s; a different one means it changed the pump (start, stop, spa, program).
+    static int lastSetRPM[4] = {-1, -1, -1, -1};
+    int setRPM = ( (packet_buffer[EP_HI_B_RPM-1] * 256) + packet_buffer[EP_LO_B_RPM-1]) / 4;
+    int pi = packet_buffer[PKT_DEST] & 0x03; // ePump IDs 0x78..0x7b
+    if (lastSetRPM[pi] != setRPM) {
+      if (lastSetRPM[pi] != -1)
+        iaqt_status_event("panel changed a pump's speed");
+      lastSetRPM[pi] = setRPM;
+    }
   } else if (packet_buffer[3] == CMD_EPUMP_WATTS) {
     LOG(DJAN_LOG, LOG_INFO, "ControlPanel request Pump ID 0x%02hhx get watts\n",packet_buffer[PKT_DEST]);
   }

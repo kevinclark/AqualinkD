@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "aq_serial.h"
 #include "aqualink.h"
@@ -668,6 +669,8 @@ void debugPrintButtons(struct iaqt_page_button buttons[])
 
 //#define member_size(type, member) (sizeof( ((type*)0)->member ))
 
+static void iaqt_status_read_done(struct aqualinkdata *aqdata);
+
 void processPage(struct aqualinkdata *aqdata)
 {
   //static int _home_cnt = 0;
@@ -691,6 +694,7 @@ void processPage(struct aqualinkdata *aqdata)
         iaqt_queue_cmd(KEY_IAQTCH_KEY02);
       } else {
         iaqt_pump_update(aqdata, -1); // Reset pumps.
+        iaqt_status_read_done(aqdata);
         //iaqt_device_update(aqdata,DEVICE_RESET); // Reset any devices we monitor.
         if ( (isPDA_PANEL || PANEL_SIZE() >= 16) && !in_iaqt_programming_mode(aqdata) ) {
           iaqt_queue_cmd(KEY_IAQTCH_HOME);
@@ -829,6 +833,109 @@ void processPage(struct aqualinkdata *aqdata)
 
 static int _pollCnt;
 static bool _status_due = false; // a status-page press came due and waits for the devices page and an idle RSSA queue
+
+/*
+ iaqt_status_events: read the status page when something happens, not on a timer. The status page is the only source
+ of pump state (Priming, Offline, Priming Error) and GPM; RPM and Watts also come from the pump's own RS-485 replies
+ (read_RS485_ePump). Each status read is three page loads, during which the panel slows its whole bus round, so the
+ stock 43-poll timer costs every other device (the RS Serial Adapter above all) ~1 in 7 commands delayed.
+ Events: a pump/spa LED change (AllButton, every round), the panel changing a pump's speed (devices_jandy.c), a read
+ that showed a pump not OK (follow up every IAQT_EV_FOLLOWUP_SECS), AqualinkD's own programming finishing, and a backstop
+ (iaqt_status_backstop_secs, default 600).
+*/
+#define IAQT_EV_FOLLOWUP_SECS   60
+#define IAQT_EV_BACKSTOP_SECS  600
+#define IAQT_EV_REQUEST_POLLS   60   // a requested status page that hasn't loaded after this many polls is retried
+#define IAQT_EV_OFFPAGE_POLLS  120   // idle on a page that isn't a devices page this long: go HOME (stock did at 199 polls)
+static bool _ev_requested = false;
+static int _ev_wait = 0;
+static int _ev_offpage = 0;
+static bool _ev_after_prog = false;
+static time_t _ev_last_read = 0;
+static time_t _ev_followup_at = 0;
+
+void iaqt_status_event(const char *why)
+{
+  if (!_aqconfig_.iaqt_status_events || _status_due)
+    return;
+  _status_due = true;
+  LOG(IAQT_LOG,LOG_INFO, "Status page read due: %s\n", why);
+}
+
+static void iaqt_status_read_done(struct aqualinkdata *aqdata)
+{
+  _ev_last_read = time(NULL);
+  _ev_requested = false;
+  if (!_aqconfig_.iaqt_status_events)
+    return;
+  bool notOK = false;
+  for (int i = 0; i < aqdata->num_pumps && i < MAX_PUMPS; i++) {
+    if (aqdata->pumps[i].pStatus == PS_PRIMING || aqdata->pumps[i].pStatus == PS_OFFLINE || aqdata->pumps[i].pStatus == PS_ERROR)
+      notOK = true;
+  }
+  _ev_followup_at = notOK ? _ev_last_read + IAQT_EV_FOLLOWUP_SECS : 0;
+}
+
+static bool iaqt_is_devices_page(unsigned char page)
+{
+  return (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg || page == IAQ_PAGE_DEVICES2 || page == IAQ_PAGE_DEVICES3);
+}
+
+// Idle poll in events mode (not programming).
+static void iaqt_status_events_poll(struct aqualinkdata *aqdata, int *pollCnt)
+{
+  static aqledstate lastLeds[2 + MAX_PUMPS];
+  static int lastNum = -1;
+  aqledstate leds[2 + MAX_PUMPS];
+  int n = 0;
+  time_t now = time(NULL);
+  int backstop = (_aqconfig_.iaqt_status_backstop_secs >= 60) ? _aqconfig_.iaqt_status_backstop_secs : IAQT_EV_BACKSTOP_SECS;
+
+  // The stock counter's full cycle (>FULL_STATUS_POLL_COUNT) and its "page is stuck" error assume a HOME visit every
+  // ~43 polls. Events mode has none, so it keeps the counter at 0 and does its own stray-page recovery below.
+  *pollCnt = 0;
+
+  // Pump and spa LEDs (Filter Pump, Spa, and any button a pump is assigned to).
+  for (int i = 0; i < 2 && i < aqdata->total_buttons; i++)
+    leds[n++] = aqdata->aqbuttons[i].led->state;
+  for (int i = 0; i < aqdata->num_pumps && i < MAX_PUMPS; i++)
+    leds[n++] = (aqdata->pumps[i].button != NULL) ? aqdata->pumps[i].button->led->state : OFF;
+  if (lastNum == n && memcmp(leds, lastLeds, n * sizeof(aqledstate)) != 0)
+    iaqt_status_event("pump or spa state changed");
+  memcpy(lastLeds, leds, n * sizeof(aqledstate));
+  lastNum = n;
+
+  if (_ev_after_prog) {
+    _ev_after_prog = false;
+    iaqt_status_event("AqualinkD programming finished");
+  }
+  if (_ev_followup_at != 0 && now >= _ev_followup_at) {
+    _ev_followup_at = 0;
+    iaqt_status_event("a pump was not OK at the last read");
+  }
+  if (!_ev_requested && now - _ev_last_read >= backstop)
+    iaqt_status_event(_ev_last_read == 0 ? "startup" : "backstop");
+
+  if (iaqt_is_devices_page(_currentPage)) {
+    _ev_offpage = 0;
+    if (_status_due && !_ev_requested && !rssa_commands_waiting()) {
+      iaqt_queue_cmd(KEY_IAQTCH_STATUS); // status, then HOME, then back to devices (processPage)
+      _status_due = false;
+      _ev_requested = true;
+      _ev_wait = 0;
+    }
+  } else if (_currentPage != NUL && _currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
+    LOG(IAQT_LOG,LOG_INFO, "Idle on page 0x%02hhx for %d polls, going HOME\n", _currentPage, IAQT_EV_OFFPAGE_POLLS);
+    iaqt_queue_cmd(KEY_IAQTCH_HOME);
+    _ev_offpage = 0;
+  }
+
+  if (_ev_requested && ++_ev_wait > IAQT_EV_REQUEST_POLLS) {
+    LOG(IAQT_LOG,LOG_WARNING, "Status page did not load within %d polls of the request, will ask again\n", IAQT_EV_REQUEST_POLLS);
+    _ev_requested = false;
+    _status_due = true;
+  }
+}
 
 // running through status while programming a lighgt seems to confuse the panel, so let
 // other people reset our poll count.
@@ -1081,6 +1188,9 @@ if not programming && poll packet {
       //if ( (isPDA_PANEL || isVirtualButtonEnabled() || PANEL_SIZE() >= 16) && !in_iaqt_programming_mode(aqdata) ) {
       // Just sent Status Page request if none of the above are active
       //}
+      if (_aqconfig_.iaqt_status_events) {
+        iaqt_status_events_poll(aqdata, &_pollCnt);
+      } else {
       // After we send devices page in above if statment, kick us through a loop of
       // devices devices1 devices2 devices2 status.
       // We probably only need to go over this loop if iaqualink2 is NOT enabled.
@@ -1135,6 +1245,12 @@ if not programming && poll packet {
           _status_due = false;
         }
       }
+      } // !iaqt_status_events
+    } else if (in_programming_mode(aqdata) == true && _aqconfig_.iaqt_status_events) {
+      // The programmer moves pages itself and may consume a pending request; read once it finishes.
+      _ev_after_prog = true;
+      _ev_requested = false;
+      _ev_wait = 0;
     } else if (in_programming_mode(aqdata) == true) {
       // Set count to something close to max, so we will pull latest info once programming has finished.
       // This is good for VSP GPM programming as it takes number of seconds to register once finished programming.

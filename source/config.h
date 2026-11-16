@@ -80,6 +80,7 @@ struct aqconfig
   int iaqt_status_poll_count;  // iAQ Touch polls between status-page requests; 0 = stock (DEVICE_STATUS_POLL_COUNT)
   bool iaqt_status_events;     // read the iAQ Touch status page on pump events + a backstop, not every iaqt_status_poll_count polls
   int iaqt_status_backstop_secs; // events mode: longest gap between status reads; 0 = 600
+  char *iaqt_rest_page;        // iAQ Touch device page to sit on between status reads: unset/1 = Devices #1 (stock), 2, 3 or auto
   bool mqtt_publish_log;       // publish log lines to <mqtt_aq_topic>/log
   int mqtt_log_level;          // most verbose level published (LOG_ERR..LOG_DEBUG); also capped by log_level
   unsigned char rssa_watch_first; // read-only probe: poll RS Serial Adapter IDs first..last (0x24-0x33) and log changes
@@ -293,6 +294,8 @@ int _numCfgParams;
 #define CFG_N_iaqt_status_poll_count            "iaqt_status_poll_count"
 #define CFG_N_iaqt_status_events               "iaqt_status_events"
 #define CFG_N_iaqt_status_backstop_secs        "iaqt_status_backstop_secs"
+#define CFG_N_iaqt_rest_page                   "iaqt_rest_page"
+#define CFG_V_iaqt_rest_page                   "[\"1\", \"2\", \"3\", \"auto\"]"
 #define CFG_N_mqtt_publish_log                  "mqtt_publish_log"
 #define CFG_N_mqtt_log_level                    "mqtt_log_level"
 #define CFG_V_mqtt_log_level                    "[\"DEBUG\", \"INFO\", \"NOTICE\", \"WARNING\", \"ERROR\"]"

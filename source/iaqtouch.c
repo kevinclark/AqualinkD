@@ -671,6 +671,7 @@ void debugPrintButtons(struct iaqt_page_button buttons[])
 //#define member_size(type, member) (sizeof( ((type*)0)->member ))
 
 static void iaqt_status_read_done(struct aqualinkdata *aqdata);
+static void iaqt_rest_page_seen(int dp);
 
 void processPage(struct aqualinkdata *aqdata)
 {
@@ -716,6 +717,7 @@ void processPage(struct aqualinkdata *aqdata)
         dp = 2;
       //LOG(IAQT_LOG,LOG_INFO, "Devices Page #1:-\n");
       debugPrintButtons(_devicePageButtons[dp]);
+      iaqt_rest_page_seen(dp);
 #ifndef NEW_POLL_CYCLE
       // If Button 15 has type 0x02 then we have previous, if 0x00 nothing (previous send code KEY_IAQTCH_PREV_PAGE)
       // If Button 16 has type 0x03 then we have next, if 0x00 nothing (next send code KEY_IAQTCH_NEXT_PAGE)
@@ -925,6 +927,158 @@ static void iaqt_status_read_done(struct aqualinkdata *aqdata)
   }
 }
 
+/*
+ iaqt_rest_page: the device page the idle cycle sits on between status reads. The panel pushes button changes for the
+ page on screen (one pButton + PageEnd, ~0.6 s), and a press there needs no page walk, so the best page is the one
+ holding buttons AqualinkD can learn no other way: OneTouch macros and virtual buttons without an RS Serial Adapter ID
+ (and every button on a PDA panel). Standard buttons have AllButton LEDs, RS-16 B buttons the AllButton messages.
+ Unset or 1 = Devices #1 (stock). 2 or 3 = that page. auto = walk the device pages once, then rest on the one with most
+ such buttons (ties and none: the lower page). Each status read leaves for the status page and comes back through
+ HOME and Devices #1, so a rest page past #1 costs one extra page load per page per status read: pair it with
+ iaqt_status_events. The rest page is a target, never an assumption: from any devices page before it we step forward
+ one page at a time, only when idle, waiting for each page. A panel without the page, or a walk that keeps failing,
+ falls back to Devices #1 with one log line.
+*/
+#define IAQT_REST_AUTO          -2
+#define IAQT_REST_UNDECIDED     -1
+#define IAQT_REST_WAIT_POLLS    12   // polls to wait for a requested page before trying again (~4 s)
+#define IAQT_REST_MAX_TRIES      6
+static bool _rest_seen[3] = {false, false, false};
+static int _rest_target = IAQT_REST_UNDECIDED; // device page index 0..2 once decided
+static bool _rest_gave_up = false;
+
+static void iaqt_rest_page_seen(int dp)
+{
+  if (dp >= 0 && dp < 3)
+    _rest_seen[dp] = true;
+}
+
+// Setting: 0 = Devices #1 (stock), 1/2 = Devices #2/#3, IAQT_REST_AUTO.
+static int iaqt_rest_setting()
+{
+  static int setting = -100;
+  if (setting != -100)
+    return setting;
+  const char *v = _aqconfig_.iaqt_rest_page;
+  if (v == NULL || *v == '\0' || strcmp(v, "1") == 0)
+    setting = 0;
+  else if (strcmp(v, "2") == 0)
+    setting = 1;
+  else if (strcmp(v, "3") == 0)
+    setting = 2;
+  else if (strcasecmp(v, "auto") == 0)
+    setting = IAQT_REST_AUTO;
+  else {
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page='%s' is not 1, 2, 3 or auto; using Devices #1\n", v);
+    setting = 0;
+  }
+  return setting;
+}
+
+// A button whose state only an iAQ Touch device page reports.
+static bool iaqt_page_only_button(struct aqualinkdata *aqdata, int i)
+{
+  if (isPDA_PANEL)
+    return true;
+  return (isVBUTTON(aqdata->aqbuttons[i].special_mask) && aqdata->aqbuttons[i].rssa_id == 0);
+}
+
+static int iaqt_rest_page_score(struct aqualinkdata *aqdata, int dp, char *names, int nameslen)
+{
+  int score = 0;
+  for (int b = 0; b < 15; b++) {
+    struct iaqt_page_button *pb = &_devicePageButtons[dp][b];
+    if (pb->type != 0x01 || pb->name[0] == '\0')
+      continue;
+    for (int i = 0; i < aqdata->total_buttons; i++) {
+      if (matchLabel2Button((const char *)pb->name, &aqdata->aqbuttons[i], 5) == 0) {
+        if (iaqt_page_only_button(aqdata, i)) {
+          score++;
+          if (names != NULL && (int)strlen(names) + (int)strlen(aqdata->aqbuttons[i].label) + 3 < nameslen) {
+            if (names[0] != '\0') strcat(names, ", ");
+            strcat(names, aqdata->aqbuttons[i].label);
+          }
+        }
+        break;
+      }
+    }
+  }
+  return score;
+}
+
+static void iaqt_rest_page_decide(struct aqualinkdata *aqdata, int lastPage)
+{
+  char names[200];
+  int best = 0, bestScore = 0;
+  for (int dp = 0; dp <= lastPage && dp < 3; dp++) {
+    int sc = iaqt_rest_page_score(aqdata, dp, NULL, 0);
+    if (sc > bestScore) { best = dp; bestScore = sc; }
+  }
+  names[0] = '\0';
+  iaqt_rest_page_score(aqdata, best, names, sizeof(names));
+  _rest_target = best;
+  LOG(IAQT_LOG,LOG_NOTICE, "iaqt_rest_page=auto: resting on Devices #%d (%d button%s only it reports%s%s)\n", best + 1,
+      bestScore, bestScore == 1 ? "" : "s", bestScore ? ": " : "", names);
+}
+
+// Idle on device page devPage (0..2) with no status read pending: step toward the rest page.
+static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
+{
+  static int tries = 0, wait = 0, lastPage = -2;
+  int setting = iaqt_rest_setting();
+
+  if (setting == 0 || _rest_gave_up || devPage < 0)
+    return;
+  if (devPage != lastPage) { wait = 0; lastPage = devPage; } // the page moved: the last request is done
+  if (_rest_target == IAQT_REST_UNDECIDED)
+    _rest_target = (setting == IAQT_REST_AUTO) ? IAQT_REST_UNDECIDED : setting;
+
+  bool hasNext = (_devicePageButtons[devPage][16].type == 0x03);
+  if (_rest_target == IAQT_REST_UNDECIDED) {
+    // auto: walk forward until every device page has been seen once, then decide.
+    if (!hasNext || devPage == 2) {
+      iaqt_rest_page_decide(aqdata, devPage);
+    } else if (_rest_seen[devPage + 1]) {
+      int last = devPage + 1;
+      while (last < 2 && _rest_seen[last] && _devicePageButtons[last][16].type == 0x03 && _rest_seen[last + 1])
+        last++;
+      iaqt_rest_page_decide(aqdata, last);
+    }
+  }
+  int target = (_rest_target >= 0) ? _rest_target : 2; // undecided auto keeps walking forward
+  if (devPage >= target) {
+    tries = 0;
+    return;
+  }
+  if (wait > 0) { wait--; return; }
+  if (rssa_commands_waiting())
+    return; // page loads slow the panel's RS Serial Adapter polls; let those go first
+  if (!hasNext) {
+    if (_rest_target >= 0) {
+      LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page: panel has no Devices #%d, resting on Devices #%d\n", target + 1, devPage + 1);
+      _rest_gave_up = true;
+    }
+    return;
+  }
+  if (++tries > IAQT_REST_MAX_TRIES) {
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page: Devices #%d would not load after %d tries, resting on Devices #1\n",
+        target + 1, IAQT_REST_MAX_TRIES);
+    _rest_gave_up = true;
+    return;
+  }
+  LOG(IAQT_LOG,LOG_DEBUG, "iaqt_rest_page: Devices #%d -> next page\n", devPage + 1);
+  if (iaqt_queue_cmd(KEY_IAQTCH_NEXT_PAGE))
+    wait = IAQT_REST_WAIT_POLLS;
+}
+
+static int iaqt_device_page_index(unsigned char page)
+{
+  if (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg) return 0;
+  if (page == IAQ_PAGE_DEVICES2) return 1;
+  if (page == IAQ_PAGE_DEVICES3) return 2;
+  return -1;
+}
+
 // Idle poll in events mode (not programming).
 static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
 {
@@ -985,6 +1139,8 @@ static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
         _ev_requested = true;
         _ev_wait = 0;
       }
+    } else if (!hold && !_ev_requested && (_ev_due_at == 0 || _ev_due_at > now + IAQT_EV_DELAY_SECS)) {
+      iaqt_rest_page_poll(aqdata, iaqt_device_page_index(_currentPage));
     }
   } else if (_currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
     LOG(IAQT_LOG,LOG_INFO, "Idle on page 0x%02hhx for %d polls, going HOME\n", _currentPage, IAQT_EV_OFFPAGE_POLLS);
@@ -1304,10 +1460,13 @@ if not programming && poll packet {
                     _aqconfig_.iaqt_status_poll_count : DEVICE_STATUS_POLL_COUNT;
         if (_pollCnt > 0 && _pollCnt % every == 0)
           _status_due = true;
-        if (_status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
-            !rssa_commands_waiting()) {
+        int devPage = iaqt_device_page_index(_currentPage);
+        // Stock reads status from Devices #1 only; with a rest page set, from whichever devices page we sit on.
+        if (_status_due && (devPage == 0 || (devPage > 0 && iaqt_rest_setting() != 0)) && !rssa_commands_waiting()) {
           iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
           _status_due = false;
+        } else if (!_status_due) {
+          iaqt_rest_page_poll(aqdata, devPage);
         }
       }
       } // !iaqt_status_events

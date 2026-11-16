@@ -836,64 +836,114 @@ static bool _status_due = false; // a status-page press came due and waits for t
 
 /*
  iaqt_status_events: read the status page when something happens, not on a timer. The status page is the only source
- of pump state (Priming, Offline, Priming Error) and GPM; RPM and Watts also come from the pump's own RS-485 replies
- (read_RS485_ePump). Each status read is three page loads, during which the panel slows its whole bus round, so the
- stock 43-poll timer costs every other device (the RS Serial Adapter above all) ~1 in 7 commands delayed.
- Events: a pump/spa LED change (AllButton, every round), the panel changing a pump's speed (devices_jandy.c), a read
- that showed a pump not OK (follow up every IAQT_EV_FOLLOWUP_SECS), AqualinkD's own programming finishing, and a backstop
- (iaqt_status_backstop_secs, default 600).
+ of pump state (Priming, Offline, Priming Error), and the only quick source of a stopped pump's RPM 0; RPM and Watts
+ of a running pump also come from the pump's own RS-485 replies (read_RS485_ePump). Each status read is three page
+ loads, during which the panel slows its whole bus round, so the stock 43-poll timer delays ~1 in 7 commands to every
+ other device (the RS Serial Adapter above all).
+ Events: a pump/spa LED change (AllButton, every round), the panel sending a pump a new speed or a pump not answering
+ (devices_jandy.c), and AqualinkD's own programming finishing. An event read runs IAQT_EV_DELAY_SECS after the event
+ (the panel shows Priming, or RPM 0, a few seconds late) and once more IAQT_EV_CONFIRM_SECS later whatever it showed.
+ While a pump reads Priming/Offline/Error it is read every IAQT_EV_FOLLOWUP_SECS, backing off to IAQT_EV_FOLLOWUP_MAX_SECS
+ after IAQT_EV_FOLLOWUP_FAST reads. A backstop (iaqt_status_backstop_secs, default 600, minimum 60) covers the rest.
 */
-#define IAQT_EV_FOLLOWUP_SECS   60
-#define IAQT_EV_BACKSTOP_SECS  600
-#define IAQT_EV_REQUEST_POLLS   60   // a requested status page that hasn't loaded after this many polls is retried
-#define IAQT_EV_OFFPAGE_POLLS  120   // idle on a page that isn't a devices page this long: go HOME (stock did at 199 polls)
+#define IAQT_EV_DELAY_SECS        10
+#define IAQT_EV_CONFIRM_SECS      60
+#define IAQT_EV_FOLLOWUP_SECS     60
+#define IAQT_EV_FOLLOWUP_FAST      5
+#define IAQT_EV_FOLLOWUP_MAX_SECS 300
+#define IAQT_EV_MIN_GAP_SECS      20   // never two status reads closer than this (stock never read more often than every 43 polls)
+#define IAQT_EV_BACKSTOP_SECS    600
+#define IAQT_EV_REQUEST_POLLS     60   // a requested status page that hasn't loaded after this many polls is asked for again
+#define IAQT_EV_OFFPAGE_POLLS    120   // idle off the devices pages (or mid-load) this long: press HOME (stock did at ~199 polls)
+#define IAQT_EV_STALL_SECS       300   // past the backstop with no completed read: log one error per episode
+static time_t _ev_due_at = 0;          // monotonic time a status read is due; 0 = none due
+static bool _ev_confirm = false;       // the next completed read was an event read: schedule its confirming read
 static bool _ev_requested = false;
 static int _ev_wait = 0;
+static int _ev_failed_requests = 0;
 static int _ev_offpage = 0;
+static int _ev_followups = 0;
 static bool _ev_after_prog = false;
-static time_t _ev_last_read = 0;
-static time_t _ev_followup_at = 0;
+static bool _ev_stall_logged = false;
+static time_t _ev_last_read = 0;       // monotonic; 0 = none since start
+static time_t _ev_started = 0;
+
+static time_t iaqt_ev_now()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec;
+}
+
+static void iaqt_ev_due(time_t when)
+{
+  if (_ev_due_at == 0 || when < _ev_due_at)
+    _ev_due_at = when;
+}
 
 void iaqt_status_event(const char *why)
 {
-  if (!_aqconfig_.iaqt_status_events || _status_due)
+  if (!_aqconfig_.iaqt_status_events)
     return;
-  _status_due = true;
-  LOG(IAQT_LOG,LOG_INFO, "Status page read due: %s\n", why);
+  time_t when = iaqt_ev_now() + IAQT_EV_DELAY_SECS;
+  if (_ev_due_at == 0 || when < _ev_due_at)
+    LOG(IAQT_LOG,LOG_NOTICE, "Status page read in %ds: %s\n", IAQT_EV_DELAY_SECS, why);
+  iaqt_ev_due(when);
+  _ev_confirm = true;
 }
 
 static void iaqt_status_read_done(struct aqualinkdata *aqdata)
 {
-  _ev_last_read = time(NULL);
   _ev_requested = false;
   if (!_aqconfig_.iaqt_status_events)
     return;
+  time_t now = iaqt_ev_now();
+  _ev_last_read = now;
+  _ev_failed_requests = 0;
+  _ev_stall_logged = false;
+  if (_ev_due_at != 0 && _ev_due_at <= now)
+    _ev_due_at = 0; // this read was the one due
   bool notOK = false;
   for (int i = 0; i < aqdata->num_pumps && i < MAX_PUMPS; i++) {
     if (aqdata->pumps[i].pStatus == PS_PRIMING || aqdata->pumps[i].pStatus == PS_OFFLINE || aqdata->pumps[i].pStatus == PS_ERROR)
       notOK = true;
   }
-  _ev_followup_at = notOK ? _ev_last_read + IAQT_EV_FOLLOWUP_SECS : 0;
-}
-
-static bool iaqt_is_devices_page(unsigned char page)
-{
-  return (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg || page == IAQ_PAGE_DEVICES2 || page == IAQ_PAGE_DEVICES3);
+  if (notOK) {
+    _ev_followups++;
+    iaqt_ev_due(now + (_ev_followups <= IAQT_EV_FOLLOWUP_FAST ? IAQT_EV_FOLLOWUP_SECS : IAQT_EV_FOLLOWUP_MAX_SECS));
+  } else {
+    _ev_followups = 0;
+  }
+  if (_ev_confirm) {
+    _ev_confirm = false;
+    iaqt_ev_due(now + IAQT_EV_CONFIRM_SECS);
+  }
 }
 
 // Idle poll in events mode (not programming).
-static void iaqt_status_events_poll(struct aqualinkdata *aqdata, int *pollCnt)
+static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
 {
   static aqledstate lastLeds[2 + MAX_PUMPS];
   static int lastNum = -1;
   aqledstate leds[2 + MAX_PUMPS];
   int n = 0;
-  time_t now = time(NULL);
-  int backstop = (_aqconfig_.iaqt_status_backstop_secs >= 60) ? _aqconfig_.iaqt_status_backstop_secs : IAQT_EV_BACKSTOP_SECS;
+  time_t now = iaqt_ev_now();
+  int backstop = _aqconfig_.iaqt_status_backstop_secs <= 0 ? IAQT_EV_BACKSTOP_SECS :
+                 (_aqconfig_.iaqt_status_backstop_secs < 60 ? 60 : _aqconfig_.iaqt_status_backstop_secs);
+  bool hold = false;
+  if (_ev_started == 0)
+    _ev_started = now;
 
-  // The stock counter's full cycle (>FULL_STATUS_POLL_COUNT) and its "page is stuck" error assume a HOME visit every
-  // ~43 polls. Events mode has none, so it keeps the counter at 0 and does its own stray-page recovery below.
-  *pollCnt = 0;
+  // The stock counter's full cycle (>FULL_STATUS_POLL_COUNT) and "page is stuck" error assume a HOME visit every ~43
+  // polls, which events mode doesn't make; it does its own recovery below. A negative count is the light-programming
+  // hold (delay_iaqTouch4lightProgramming): count it up and send no status request meanwhile. Otherwise keep it at 1
+  // (iaqualink.c only asks for iAqualink status while it is > 0).
+  if (_pollCnt < 0) {
+    _pollCnt++;
+    hold = true;
+  } else {
+    _pollCnt = 1;
+  }
 
   // Pump and spa LEDs (Filter Pump, Spa, and any button a pump is assigned to).
   for (int i = 0; i < 2 && i < aqdata->total_buttons; i++)
@@ -909,31 +959,40 @@ static void iaqt_status_events_poll(struct aqualinkdata *aqdata, int *pollCnt)
     _ev_after_prog = false;
     iaqt_status_event("AqualinkD programming finished");
   }
-  if (_ev_followup_at != 0 && now >= _ev_followup_at) {
-    _ev_followup_at = 0;
-    iaqt_status_event("a pump was not OK at the last read");
+  if (_ev_due_at == 0 && !_ev_requested && (_ev_last_read == 0 || now - _ev_last_read >= backstop)) {
+    LOG(IAQT_LOG,LOG_INFO, "Status page read due: %s\n", _ev_last_read == 0 ? "startup" : "backstop");
+    _ev_due_at = now;
   }
-  if (!_ev_requested && now - _ev_last_read >= backstop)
-    iaqt_status_event(_ev_last_read == 0 ? "startup" : "backstop");
 
-  if (iaqt_is_devices_page(_currentPage)) {
+  time_t since = now - (_ev_last_read != 0 ? _ev_last_read : _ev_started);
+  if (since >= backstop + IAQT_EV_STALL_SECS && !_ev_stall_logged) {
+    LOG(IAQT_LOG,LOG_ERR, "No status page read completed for %ld s (page 0x%02hhx), pump state may be stale\n",
+        (long)since, _currentPage);
+    _ev_stall_logged = true;
+  }
+
+  if (iaqt_is_device_page(_currentPage)) {
     _ev_offpage = 0;
-    if (_status_due && !_ev_requested && !rssa_commands_waiting()) {
-      iaqt_queue_cmd(KEY_IAQTCH_STATUS); // status, then HOME, then back to devices (processPage)
-      _status_due = false;
-      _ev_requested = true;
-      _ev_wait = 0;
+    if (!hold && _ev_due_at != 0 && now >= _ev_due_at && !_ev_requested && now - _ev_last_read >= IAQT_EV_MIN_GAP_SECS &&
+        !rssa_commands_waiting()) {
+      if (iaqt_queue_cmd(KEY_IAQTCH_STATUS)) { // status, then HOME, then back to devices (processPage)
+        _ev_requested = true;
+        _ev_wait = 0;
+      }
     }
-  } else if (_currentPage != NUL && _currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
+  } else if (_currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
     LOG(IAQT_LOG,LOG_INFO, "Idle on page 0x%02hhx for %d polls, going HOME\n", _currentPage, IAQT_EV_OFFPAGE_POLLS);
     iaqt_queue_cmd(KEY_IAQTCH_HOME);
     _ev_offpage = 0;
   }
 
   if (_ev_requested && ++_ev_wait > IAQT_EV_REQUEST_POLLS) {
-    LOG(IAQT_LOG,LOG_WARNING, "Status page did not load within %d polls of the request, will ask again\n", IAQT_EV_REQUEST_POLLS);
     _ev_requested = false;
-    _status_due = true;
+    if (++_ev_failed_requests >= 3) {
+      LOG(IAQT_LOG,LOG_WARNING, "Status page did not load after %d requests, going HOME\n", _ev_failed_requests);
+      iaqt_queue_cmd(KEY_IAQTCH_HOME);
+      _ev_failed_requests = 0;
+    }
   }
 }
 
@@ -1189,7 +1248,7 @@ if not programming && poll packet {
       // Just sent Status Page request if none of the above are active
       //}
       if (_aqconfig_.iaqt_status_events) {
-        iaqt_status_events_poll(aqdata, &_pollCnt);
+        iaqt_status_events_poll(aqdata);
       } else {
       // After we send devices page in above if statment, kick us through a loop of
       // devices devices1 devices2 devices2 status.

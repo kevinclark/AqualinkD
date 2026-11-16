@@ -585,7 +585,7 @@ void iaqt_onoff_abandon(struct aqualinkdata *aqdata, const char *reason)
   pthread_mutex_unlock(&_iaqt_pending_mutex);
 }
 
-static bool iaqt_is_device_page(unsigned char page)
+bool iaqt_is_device_page(unsigned char page)
 {
   return (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES2 || page == IAQ_PAGE_DEVICES3 || page == IAQ_PAGE_DEVICES_REV_Yg);
 }

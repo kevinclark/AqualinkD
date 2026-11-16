@@ -8,6 +8,7 @@ unsigned char pop_iaqt_cmd(unsigned char receive_type);
 
 void set_iaq_cansend(bool cansend);
 bool iaqt_queue_cmd(unsigned char cmd);
+bool iaqt_is_device_page(unsigned char page);
 
 void *set_aqualink_iaqtouch_pump_rpm( void *ptr );
 void *set_aqualink_iaqtouch_vsp_assignments( void *ptr );

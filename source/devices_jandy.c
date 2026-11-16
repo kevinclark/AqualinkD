@@ -590,6 +590,11 @@ const char *get_swg_status_msg(struct aqualinkdata *aqdata)
 #define EP_HI_B_RPM 7
 #define EP_LO_B_RPM 6
 
+// iaqt_status_events: a pump that stops or starts answering is an event. Per pump ID, so a second pump that is unpowered
+// while off can't flip it every round.
+static bool _jandy_pump_answering[8] = {true, true, true, true, true, true, true, true};
+static int jandy_pump_slot(unsigned char id) { return (id & 0x03) + (is_jandy_pump_new_id(id) ? 4 : 0); }
+
 bool processPacketToJandyPump(unsigned char *packet_buffer, int packet_length, struct aqualinkdata *aqdata)
 {
   /*
@@ -616,7 +621,7 @@ bool processPacketToJandyPump(unsigned char *packet_buffer, int packet_length, s
     // The panel re-sends the same speed every ~11 s; a different one means it changed the pump (start, stop, spa, program).
     static int lastSetRPM[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     int setRPM = ( (packet_buffer[EP_HI_B_RPM-1] * 256) + packet_buffer[EP_LO_B_RPM-1]) / 4;
-    int pi = (packet_buffer[PKT_DEST] & 0x03) + (is_jandy_pump_new_id(packet_buffer[PKT_DEST]) ? 4 : 0); // 0x78..0x7b, 0xe0..0xe3
+    int pi = jandy_pump_slot(packet_buffer[PKT_DEST]); // 0x78..0x7b, 0xe0..0xe3
     if (lastSetRPM[pi] != setRPM) {
       if (lastSetRPM[pi] != -1)
         iaqt_status_event("panel changed a pump's speed");
@@ -639,14 +644,13 @@ bool processPacketToJandyPump(unsigned char *packet_buffer, int packet_length, s
   return false;
 }
 
-static bool _jandy_pump_answering = true; // iaqt_status_events: a pump that stops or starts answering is an event
 
 bool processPacketFromJandyPump(unsigned char *packet_buffer, int packet_length, struct aqualinkdata *aqdata, const unsigned char previous_packet_to)
 {
   bool found=false;
 
-  if (!_jandy_pump_answering) {
-    _jandy_pump_answering = true;
+  if (!_jandy_pump_answering[jandy_pump_slot(previous_packet_to)]) {
+    _jandy_pump_answering[jandy_pump_slot(previous_packet_to)] = true;
     iaqt_status_event("a pump started answering the panel again");
   }
 
@@ -685,8 +689,8 @@ void processMissingAckPacketFromJandyPump(unsigned char destination, struct aqua
 {
   // The pump stopped answering the panel: the status page will show it Offline (iaqt_status_events). Only the change
   // counts: a pump whose power the panel cuts while it is off misses every poll then.
-  if (_jandy_pump_answering) {
-    _jandy_pump_answering = false;
+  if (_jandy_pump_answering[jandy_pump_slot(destination)]) {
+    _jandy_pump_answering[jandy_pump_slot(destination)] = false;
     iaqt_status_event("a pump stopped answering the panel");
   }
   return;

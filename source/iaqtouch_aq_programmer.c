@@ -672,6 +672,9 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
       break;
     }
     int settled = 0;
+    // A round that starts on a later device page (iaqt_rest_page) can't see earlier pages; if it finds nothing it is
+    // not an idle round, the next one starts from HOME.
+    bool startedPastFirst = (iaqtCurrentPage() == IAQ_PAGE_DEVICES2 || iaqtCurrentPage() == IAQ_PAGE_DEVICES3);
 
     if (iaqt_is_device_page(iaqtCurrentPage())) {
       // The idle poll may be leaving this page right now; let one message through so a page change shows.
@@ -696,7 +699,7 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
       send_aqt_cmd(KEY_IAQTCH_NEXT_PAGE);
       waitfor_iaqt_nextPage(aqdata);
     }
-    idle_rounds = (settled > 0) ? 0 : idle_rounds + 1;
+    idle_rounds = (settled > 0) ? 0 : (startedPastFirst ? idle_rounds : idle_rounds + 1);
 
     // Anything left is on an earlier page, arrived late, or met a popup: the next round starts again from HOME.
     if (iaqt_any_pending(aqdata, false)) {

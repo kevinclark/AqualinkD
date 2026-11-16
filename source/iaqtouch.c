@@ -954,7 +954,7 @@ static void iaqt_rest_page_seen(int dp)
 }
 
 // Setting: 0 = Devices #1 (stock), 1/2 = Devices #2/#3, IAQT_REST_AUTO.
-static int iaqt_rest_setting()
+static int iaqt_rest_setting(void)
 {
   static int setting = -100;
   if (setting != -100)
@@ -972,6 +972,9 @@ static int iaqt_rest_setting()
     LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page='%s' is not 1, 2, 3 or auto; using Devices #1\n", v);
     setting = 0;
   }
+  if (setting != 0 && !_aqconfig_.iaqt_status_events)
+    LOG(IAQT_LOG,LOG_NOTICE, "iaqt_rest_page=%s without iaqt_status_events: every status read walks back to the rest page "
+        "(one extra page load per page past Devices #1)\n", v);
   return setting;
 }
 
@@ -991,7 +994,11 @@ static int iaqt_rest_page_score(struct aqualinkdata *aqdata, int dp, char *names
     if (pb->type != 0x01 || pb->name[0] == '\0')
       continue;
     for (int i = 0; i < aqdata->total_buttons; i++) {
-      if (matchLabel2Button((const char *)pb->name, &aqdata->aqbuttons[i], 5) == 0) {
+      // Same match as matchLabel2Button, without setting in_alt_mode.
+      aqkey *ab = &aqdata->aqbuttons[i];
+      if (rsm_strmatch_ignore((const char *)pb->name, ab->label, 5) == 0 ||
+          (isVBUTTON_ALTLABEL(ab->special_mask) &&
+           rsm_strmatch_ignore((const char *)pb->name, ((altlabel_detail *)ab->special_mask_ptr)->altlabel, 5) == 0)) {
         if (iaqt_page_only_button(aqdata, i)) {
           score++;
           if (names != NULL && (int)strlen(names) + (int)strlen(aqdata->aqbuttons[i].label) + 3 < nameslen) {
@@ -1029,21 +1036,20 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
 
   if (setting == 0 || _rest_gave_up || devPage < 0)
     return;
-  if (devPage != lastPage) { wait = 0; lastPage = devPage; } // the page moved: the last request is done
+  if (devPage != lastPage) { // the page moved: the last request is done
+    if (devPage > lastPage)
+      tries = 0;               // and it worked; only NEXT presses that don't move the page count as failures
+    wait = 0;
+    lastPage = devPage;
+  }
   if (_rest_target == IAQT_REST_UNDECIDED)
     _rest_target = (setting == IAQT_REST_AUTO) ? IAQT_REST_UNDECIDED : setting;
 
   bool hasNext = (_devicePageButtons[devPage][16].type == 0x03);
   if (_rest_target == IAQT_REST_UNDECIDED) {
-    // auto: walk forward until every device page has been seen once, then decide.
-    if (!hasNext || devPage == 2) {
+    // auto: decide only on the last device page (no Next), so every page has been seen.
+    if (!hasNext || devPage == 2)
       iaqt_rest_page_decide(aqdata, devPage);
-    } else if (_rest_seen[devPage + 1]) {
-      int last = devPage + 1;
-      while (last < 2 && _rest_seen[last] && _devicePageButtons[last][16].type == 0x03 && _rest_seen[last + 1])
-        last++;
-      iaqt_rest_page_decide(aqdata, last);
-    }
   }
   int target = (_rest_target >= 0) ? _rest_target : 2; // undecided auto keeps walking forward
   if (devPage >= target) {
@@ -1056,7 +1062,7 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
   if (!hasNext) {
     if (_rest_target >= 0) {
       LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page: panel has no Devices #%d, resting on Devices #%d\n", target + 1, devPage + 1);
-      _rest_gave_up = true;
+      _rest_target = devPage;
     }
     return;
   }
@@ -1465,7 +1471,7 @@ if not programming && poll packet {
         if (_status_due && (devPage == 0 || (devPage > 0 && iaqt_rest_setting() != 0)) && !rssa_commands_waiting()) {
           iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
           _status_due = false;
-        } else if (!_status_due) {
+        } else if (!_status_due && _pollCnt >= 0) { // negative = light-programming hold
           iaqt_rest_page_poll(aqdata, devPage);
         }
       }

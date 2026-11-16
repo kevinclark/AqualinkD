@@ -295,7 +295,6 @@ int _numCfgParams;
 #define CFG_N_iaqt_status_events               "iaqt_status_events"
 #define CFG_N_iaqt_status_backstop_secs        "iaqt_status_backstop_secs"
 #define CFG_N_iaqt_rest_page                   "iaqt_rest_page"
-#define CFG_V_iaqt_rest_page                   "[\"1\", \"2\", \"3\", \"auto\"]"
 #define CFG_N_mqtt_publish_log                  "mqtt_publish_log"
 #define CFG_N_mqtt_log_level                    "mqtt_log_level"
 #define CFG_V_mqtt_log_level                    "[\"DEBUG\", \"INFO\", \"NOTICE\", \"WARNING\", \"ERROR\"]"

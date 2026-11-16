@@ -674,7 +674,8 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
     int settled = 0;
     // A round that starts on a later device page (the iaqt_status_events rest page) can't see earlier pages; if it finds nothing it is
     // not an idle round, the next one starts from HOME.
-    bool startedPastFirst = (iaqtCurrentPage() == IAQ_PAGE_DEVICES2 || iaqtCurrentPage() == IAQ_PAGE_DEVICES3);
+    // Only the first round can start there (later rounds start from HOME), so this can't keep a sweep alive.
+    bool startedPastFirst = (round == 0 && (iaqtCurrentPage() == IAQ_PAGE_DEVICES2 || iaqtCurrentPage() == IAQ_PAGE_DEVICES3));
 
     if (iaqt_is_device_page(iaqtCurrentPage())) {
       // The idle poll may be leaving this page right now; let one message through so a page change shows.

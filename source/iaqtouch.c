@@ -671,7 +671,6 @@ void debugPrintButtons(struct iaqt_page_button buttons[])
 //#define member_size(type, member) (sizeof( ((type*)0)->member ))
 
 static void iaqt_status_read_done(struct aqualinkdata *aqdata);
-static void iaqt_rest_page_seen(int dp);
 
 void processPage(struct aqualinkdata *aqdata)
 {
@@ -717,7 +716,6 @@ void processPage(struct aqualinkdata *aqdata)
         dp = 2;
       //LOG(IAQT_LOG,LOG_INFO, "Devices Page #1:-\n");
       debugPrintButtons(_devicePageButtons[dp]);
-      iaqt_rest_page_seen(dp);
 #ifndef NEW_POLL_CYCLE
       // If Button 15 has type 0x02 then we have previous, if 0x00 nothing (previous send code KEY_IAQTCH_PREV_PAGE)
       // If Button 16 has type 0x03 then we have next, if 0x00 nothing (next send code KEY_IAQTCH_NEXT_PAGE)
@@ -896,14 +894,15 @@ static bool iaqt_events_on(void)
   if (!_aqconfig_.iaqt_status_events)
     return false;
   if (isPDA_PANEL || PANEL_SIZE() < 16) {
-    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events works on RS panels of 16+ circuits only (untested elsewhere); "
-        "using the standard status cycle\n");
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events works on RS panels of 16+ circuits only (untested elsewhere; panel "
+        "size %d, set panel_type if it is wrong); using the standard status cycle\n", PANEL_SIZE());
     return false;
   }
   if (!READ_RSDEV_ePUMP)
-    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events without read_RS485_ePump: a pump speed change or a pump that stops "
-        "answering won't trigger a status read; pump/spa on-off changes and the backstop still do\n");
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events without read_RS485_ePump: a Jandy ePump's speed change or a pump that "
+        "stops answering won't trigger a status read; pump/spa on-off changes and the backstop still do\n");
   _ev_mode = 1;
+  _ev_confirm = true; // events before this decision were dropped: confirm the startup read with a second one
   return true;
 }
 
@@ -927,8 +926,7 @@ static void iaqt_ev_warn_stale_readings(struct aqualinkdata *aqdata)
   for (int i = 0; i < IAQ_STATUS_PAGE_LINES; i++) {
     if (rsm_strcmp(_deviceStatus[i], "GPM:") == 0) { what = "pump GPM"; bit = 1; }
     else if (rsm_strcmp(_deviceStatus[i], "Chemlink") == 0 || rsm_strcmp(_deviceStatus[i], "ORP") == 0) { what = "Chemlink pH/ORP"; bit = 2; }
-    else if (rsm_strcmp(_deviceStatus[i], "Chiller") == 0 || rsm_strcmp(_deviceStatus[i], "Heat Pump") == 0) { what = "chiller/heat pump"; bit = 4; }
-    else if (!READ_RSDEV_SWG && (rsm_strcmp(_deviceStatus[i], "AQUAPURE") == 0 || rsm_strcmp(_deviceStatus[i], "salt") == 0)) { what = "SWG percent/salt (read_RS485_swg is off)"; bit = 8; }
+    else if (ENABLE_CHILLER && (rsm_strcmp(_deviceStatus[i], "Chiller") == 0 || rsm_strcmp(_deviceStatus[i], "Heat Pump") == 0)) { what = "chiller/heat pump"; bit = 4; }
     else continue;
     if (!(warned & bit)) {
       warned |= bit;
@@ -985,15 +983,8 @@ static void iaqt_status_read_done(struct aqualinkdata *aqdata)
 #define IAQT_REST_UNDECIDED     -1
 #define IAQT_REST_WAIT_POLLS    12   // polls to wait for a requested page before trying again (~4 s)
 #define IAQT_REST_MAX_TRIES      6
-static bool _rest_seen[3] = {false, false, false};
 static int _rest_target = IAQT_REST_UNDECIDED; // device page index 0..2 once decided
 static bool _rest_gave_up = false;
-
-static void iaqt_rest_page_seen(int dp)
-{
-  if (dp >= 0 && dp < 3)
-    _rest_seen[dp] = true;
-}
 
 // The rest page is chosen automatically in events mode; otherwise Devices #1 (stock).
 static int iaqt_rest_setting(void)

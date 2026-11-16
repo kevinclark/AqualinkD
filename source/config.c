@@ -40,7 +40,6 @@
 #include <regex.h>
 #include <limits.h>
 
-
 #define CONFIG_C
 #include "rs_devices.h"
 #include "config.h"
@@ -60,7 +59,6 @@
 #define MAXCFGLINE 256
 
 
-
 //char *generate_mqtt_id(char *buf, int len);
 pump_detail *getpump(struct aqualinkdata *aqdata, int button);
 bool populatePumpData(struct aqualinkdata *aqdata, char *pumpcfg ,aqkey *button, char *value);
@@ -70,7 +68,6 @@ pump_detail *getPumpFromButtonID(struct aqualinkdata *aqdata, aqkey *button);
 clight_detail *getLightFromButtonID(struct aqualinkdata *aqdata, aqkey *button);
 aqkey *getVirtualButton(struct aqualinkdata *aqdata, int num);
 struct aqualinkdata *_aqdata = NULL;
-
 
 
 struct tmpPanelInfo {
@@ -177,7 +174,6 @@ const int           _dcfg_light_programming_mode = 0;
 const int           _dcfg_light_programming_initial_on = 15;
 const int           _dcfg_light_programming_initial_off = 12;
 
-
 const int           _dcfg_sensor_poll_time = 300;
 
 void init_parameters (struct aqconfig * parms)
@@ -196,7 +192,6 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
   _cfgParams[_numCfgParams].default_value = (void *)_dcfg_web_port;
 
-
 #if MG_TLS > 0
   _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.cert_dir;
@@ -208,7 +203,6 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].config_mask |= CFG_GRP_ADVANCED;
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
 #endif 
-
 
   _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.serial_port;
@@ -227,14 +221,12 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].valid_values = CFG_V_log_level;
   _cfgParams[_numCfgParams].default_value = (void *) &_dcfg_loglevel;
 
-
   _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.mg_log_level;
   _cfgParams[_numCfgParams].value_type = CFG_INT; // Set with _aqconfig_.log_level = text2elevel(cleanalloc(value));
   _cfgParams[_numCfgParams].name = CFG_N_MG_log_level;
   _cfgParams[_numCfgParams].config_mask |= CFG_READONLY;
   _cfgParams[_numCfgParams].default_value = (void *) &_dcfg_zero;
-
 
 
   _numCfgParams++;
@@ -331,13 +323,6 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].value_type = CFG_INT;
   _cfgParams[_numCfgParams].name = CFG_N_iaqt_status_backstop_secs;
   _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_zero;
-  _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
-
-  _numCfgParams++;
-  _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.iaqt_rest_page;
-  _cfgParams[_numCfgParams].value_type = CFG_STRING;
-  _cfgParams[_numCfgParams].name = CFG_N_iaqt_rest_page;  // 1, 2, 3 or auto; checked in iaqtouch.c (a blank value means 1)
-  _cfgParams[_numCfgParams].default_value = (void *)_dcfg_null;
   _cfgParams[_numCfgParams].config_mask |= CFG_FORCE_RESTART;
 
   _numCfgParams++;
@@ -665,7 +650,6 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].name = CFG_N_rs485_frame_delay;
   _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_zero;
 
-
   _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.sync_panel_time;
   _cfgParams[_numCfgParams].value_type = CFG_BOOL;
@@ -724,7 +708,6 @@ void init_parameters (struct aqconfig * parms)
   _cfgParams[_numCfgParams].default_value = (void *)&_dcfg_sensor_poll_time;
   _cfgParams[_numCfgParams].config_mask |= CFG_GRP_ADVANCED;
 
-
   // Optional values to store in config
   _numCfgParams++;
   _cfgParams[_numCfgParams].value_ptr = &_aqconfig_.save_debug_log_masks;
@@ -761,7 +744,6 @@ void init_parameters (struct aqconfig * parms)
   // CHANGED DEFAULT IN V3.  (WAnt to DELETE this)
   parms->device_pre_state = true;
 
-
   clearDebugLogMask();
   
   for (int i=0; i < MAX_RSSD_LOG_FILTERS; i++) {
@@ -772,7 +754,6 @@ void init_parameters (struct aqconfig * parms)
 
   set_config_defaults();
 }
-
 
 /*
 
@@ -935,8 +916,6 @@ bool mac(char *buf, int len, bool useDelimiter)
 
 
 
-
-
 bool setConfigValue(struct aqualinkdata *aqdata, char *param, char *value) {
   bool rtn = false;
   char *tmpval;
@@ -1075,10 +1054,8 @@ if (strlen(cleanwhitespace(value)) <= 0) {
     rtn=true;
 */
 
-
   // ************************************************************************
   // Old names that we will map.
-
 
   } else if (strncasecmp(param, "socket_port", 11) == 0) {
     if ( strcasestr(value, "http") != NULL ) {
@@ -1418,7 +1395,6 @@ aqkey *getVirtualButton(struct aqualinkdata *aqdata, int num)
   //char vbname[10];
   //snprintf(vbname, 9, "%s%d", BTN_VAUX, num);
 
-
   if (aqdata->virtual_button_start <= 0) {
     return addVirtualButton(aqdata, NULL, num);
   }
@@ -1483,7 +1459,6 @@ bool populatePumpData(struct aqualinkdata *aqdata, char *pumpcfg ,aqkey *button,
   return true;
 }
 
-
 bool populateAltLabel(aqkey *button, char *value)
 {
   return setVirtualButtonAltLabel(button, cleanalloc(value));
@@ -1529,7 +1504,6 @@ bool populateLightData(struct aqualinkdata *aqdata, char *lightcfg ,aqkey *butto
 
   return false;
 }
-
 
 
 pump_detail *getPumpFromButtonID(struct aqualinkdata *aqdata, aqkey *button)
@@ -1637,7 +1611,6 @@ void init_config()
 }
 
 
-
 //void readCfg (struct aqconfig *config_parameters, struct aqualinkdata *aqdata, char *cfgFile)
 void read_config (struct aqualinkdata *aqdata, char *cfgFile)
 {
@@ -1649,7 +1622,6 @@ void read_config (struct aqualinkdata *aqdata, char *cfgFile)
   //int line = 0;
   //int tokenindex = 0;
   char *b_ptr;
-
 
   //setlocale(LC_ALL, "en_US.UTF-8"); 
 
@@ -1689,8 +1661,6 @@ void read_config (struct aqualinkdata *aqdata, char *cfgFile)
 
   //free(_defaultPanel);
 }
-
-
 
 
 
@@ -1739,7 +1709,6 @@ char *errorlevel2text(int level)
 #define ERR_VBUTTON_4_BOOSTON                     (1<<9)
 #define ERR_HEATPUMP_CHILLER                      (1<<10)
 #define ERR_VBUTTON_ONET_NOID                     (1<<11)
-
 
 void check_print_config (struct aqualinkdata *aqdata)
 {
@@ -1990,7 +1959,6 @@ void check_print_config (struct aqualinkdata *aqdata)
   */
 
 
-
   for ( i=0; i <= _numCfgParams; i++) {
 
     // Reconfigure some CFG values depending on PDA
@@ -2146,7 +2114,6 @@ void check_print_config (struct aqualinkdata *aqdata)
          (aqdata->sensors[i].regex==NULL?"":aqdata->sensors[i].regex));
   }
 
-
   if (isMASK_SET(errors, ERR_INVALID_SENSORS)) {
     LOG(AQUA_LOG,LOG_ERR, "Config error, Invalid sensor was removed!\n");
   }
@@ -2185,7 +2152,6 @@ void check_print_config (struct aqualinkdata *aqdata)
   }
 
 }
-
 
 
 /*
@@ -2589,7 +2555,6 @@ bool writeCfg (struct aqualinkdata *aqdata)
     }
  
   }
-
 
   //remount_root_ro(fs);
 

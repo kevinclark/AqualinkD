@@ -885,9 +885,31 @@ static void iaqt_ev_due(time_t when)
     _ev_due_at = when;
 }
 
+static int _ev_mode = -1; // -1 undecided (first idle poll decides), 0 stock status cycle, 1 events mode
+
+// Decided once, at the first idle poll, when the panel type is known.
+static bool iaqt_events_on(void)
+{
+  if (_ev_mode != -1)
+    return _ev_mode == 1;
+  _ev_mode = 0;
+  if (!_aqconfig_.iaqt_status_events)
+    return false;
+  if (isPDA_PANEL || PANEL_SIZE() < 16) {
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events works on RS panels of 16+ circuits only (untested elsewhere); "
+        "using the standard status cycle\n");
+    return false;
+  }
+  if (!READ_RSDEV_ePUMP)
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events without read_RS485_ePump: a pump speed change or a pump that stops "
+        "answering won't trigger a status read; pump/spa on-off changes and the backstop still do\n");
+  _ev_mode = 1;
+  return true;
+}
+
 void iaqt_status_event(const char *why)
 {
-  if (!_aqconfig_.iaqt_status_events)
+  if (_ev_mode != 1)
     return;
   time_t when = iaqt_ev_now() + IAQT_EV_DELAY_SECS;
   if (_ev_due_at == 0 || when < _ev_due_at)
@@ -896,11 +918,32 @@ void iaqt_status_event(const char *why)
   _ev_confirm = true;
 }
 
+// Readings that only the status page supplies update on events and at the backstop in events mode: say so, once each.
+static void iaqt_ev_warn_stale_readings(struct aqualinkdata *aqdata)
+{
+  static unsigned warned = 0;
+  const char *what = NULL;
+  unsigned bit = 0;
+  for (int i = 0; i < IAQ_STATUS_PAGE_LINES; i++) {
+    if (rsm_strcmp(_deviceStatus[i], "GPM:") == 0) { what = "pump GPM"; bit = 1; }
+    else if (rsm_strcmp(_deviceStatus[i], "Chemlink") == 0 || rsm_strcmp(_deviceStatus[i], "ORP") == 0) { what = "Chemlink pH/ORP"; bit = 2; }
+    else if (rsm_strcmp(_deviceStatus[i], "Chiller") == 0 || rsm_strcmp(_deviceStatus[i], "Heat Pump") == 0) { what = "chiller/heat pump"; bit = 4; }
+    else if (!READ_RSDEV_SWG && (rsm_strcmp(_deviceStatus[i], "AQUAPURE") == 0 || rsm_strcmp(_deviceStatus[i], "salt") == 0)) { what = "SWG percent/salt (read_RS485_swg is off)"; bit = 8; }
+    else continue;
+    if (!(warned & bit)) {
+      warned |= bit;
+      LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events: %s comes only from the status page, so it now updates on pump events "
+          "and at the backstop, not every few seconds\n", what);
+    }
+  }
+}
+
 static void iaqt_status_read_done(struct aqualinkdata *aqdata)
 {
   _ev_requested = false;
-  if (!_aqconfig_.iaqt_status_events)
+  if (_ev_mode != 1)
     return;
+  iaqt_ev_warn_stale_readings(aqdata);
   time_t now = iaqt_ev_now();
   _ev_last_read = now;
   _ev_failed_requests = 0;
@@ -928,15 +971,14 @@ static void iaqt_status_read_done(struct aqualinkdata *aqdata)
 }
 
 /*
- iaqt_rest_page: the device page the idle cycle sits on between status reads. The panel pushes button changes for the
- page on screen (one pButton + PageEnd, ~0.6 s), and a press there needs no page walk, so the best page is the one
- holding buttons AqualinkD can learn no other way: OneTouch macros and virtual buttons without an RS Serial Adapter ID
- (and every button on a PDA panel). Standard buttons have AllButton LEDs, RS-16 B buttons the AllButton messages.
- Unset or 1 = Devices #1 (stock). 2 or 3 = that page. auto = walk the device pages once, then rest on the one with most
- such buttons (ties and none: the lower page). Each status read leaves for the status page and comes back through
- HOME and Devices #1, so a rest page past #1 costs one extra page load per page per status read: pair it with
- iaqt_status_events. The rest page is a target, never an assumption: from any devices page before it we step forward
- one page at a time, only when idle, waiting for each page. A panel without the page, or a walk that keeps failing,
+ Rest page (iaqt_status_events): the device page the idle cycle sits on between status reads. The panel pushes button
+ changes for the page on screen (one pButton + PageEnd, ~0.6 s), and a press there needs no page walk, so the best page
+ is the one holding buttons AqualinkD can learn no other way: OneTouch macros and virtual buttons without an RS Serial
+ Adapter ID. Standard buttons have AllButton LEDs, RS-16 B buttons the AllButton messages. It walks the device pages once,
+ then rests on the page with most such buttons (ties and none: the lower page), logging the choice. Each status read
+ comes back through HOME and Devices #1, so a later rest page costs one extra page load per page per read; with event
+ reads that is small. The rest page is a target, never an assumption: from any devices page before it we step forward
+ one page at a time, only when idle, waiting for each page. A missing page rests where it is; a walk that keeps failing
  falls back to Devices #1 with one log line.
 */
 #define IAQT_REST_AUTO          -2
@@ -953,29 +995,10 @@ static void iaqt_rest_page_seen(int dp)
     _rest_seen[dp] = true;
 }
 
-// Setting: 0 = Devices #1 (stock), 1/2 = Devices #2/#3, IAQT_REST_AUTO.
+// The rest page is chosen automatically in events mode; otherwise Devices #1 (stock).
 static int iaqt_rest_setting(void)
 {
-  static int setting = -100;
-  if (setting != -100)
-    return setting;
-  const char *v = _aqconfig_.iaqt_rest_page;
-  if (v == NULL || *v == '\0' || strcmp(v, "1") == 0)
-    setting = 0;
-  else if (strcmp(v, "2") == 0)
-    setting = 1;
-  else if (strcmp(v, "3") == 0)
-    setting = 2;
-  else if (strcasecmp(v, "auto") == 0)
-    setting = IAQT_REST_AUTO;
-  else {
-    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page='%s' is not 1, 2, 3 or auto; using Devices #1\n", v);
-    setting = 0;
-  }
-  if (setting != 0 && !_aqconfig_.iaqt_status_events)
-    LOG(IAQT_LOG,LOG_NOTICE, "iaqt_rest_page=%s without iaqt_status_events: every status read walks back to the rest page "
-        "(one extra page load per page past Devices #1)\n", v);
-  return setting;
+  return (_ev_mode == 1) ? IAQT_REST_AUTO : 0;
 }
 
 // A button whose state only an iAQ Touch device page reports.
@@ -1024,7 +1047,7 @@ static void iaqt_rest_page_decide(struct aqualinkdata *aqdata, int lastPage)
   names[0] = '\0';
   iaqt_rest_page_score(aqdata, best, names, sizeof(names));
   _rest_target = best;
-  LOG(IAQT_LOG,LOG_NOTICE, "iaqt_rest_page=auto: resting on Devices #%d (%d button%s only it reports%s%s)\n", best + 1,
+  LOG(IAQT_LOG,LOG_NOTICE, "iaqt_status_events: resting on Devices #%d (%d button%s only it reports%s%s)\n", best + 1,
       bestScore, bestScore == 1 ? "" : "s", bestScore ? ": " : "", names);
 }
 
@@ -1061,18 +1084,18 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
     return; // page loads slow the panel's RS Serial Adapter polls; let those go first
   if (!hasNext) {
     if (_rest_target >= 0) {
-      LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page: panel has no Devices #%d, resting on Devices #%d\n", target + 1, devPage + 1);
+      LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events: panel has no Devices #%d, resting on Devices #%d\n", target + 1, devPage + 1);
       _rest_target = devPage;
     }
     return;
   }
   if (++tries > IAQT_REST_MAX_TRIES) {
-    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page: Devices #%d would not load after %d tries, resting on Devices #1\n",
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_status_events: Devices #%d would not load after %d tries, resting on Devices #1\n",
         target + 1, IAQT_REST_MAX_TRIES);
     _rest_gave_up = true;
     return;
   }
-  LOG(IAQT_LOG,LOG_DEBUG, "iaqt_rest_page: Devices #%d -> next page\n", devPage + 1);
+  LOG(IAQT_LOG,LOG_DEBUG, "iaqt_status_events: Devices #%d -> next page\n", devPage + 1);
   if (iaqt_queue_cmd(KEY_IAQTCH_NEXT_PAGE))
     wait = IAQT_REST_WAIT_POLLS;
 }
@@ -1415,7 +1438,7 @@ if not programming && poll packet {
       //if ( (isPDA_PANEL || isVirtualButtonEnabled() || PANEL_SIZE() >= 16) && !in_iaqt_programming_mode(aqdata) ) {
       // Just sent Status Page request if none of the above are active
       //}
-      if (_aqconfig_.iaqt_status_events) {
+      if (iaqt_events_on()) {
         iaqt_status_events_poll(aqdata);
       } else {
       // After we send devices page in above if statment, kick us through a loop of
@@ -1466,17 +1489,14 @@ if not programming && poll packet {
                     _aqconfig_.iaqt_status_poll_count : DEVICE_STATUS_POLL_COUNT;
         if (_pollCnt > 0 && _pollCnt % every == 0)
           _status_due = true;
-        int devPage = iaqt_device_page_index(_currentPage);
-        // Stock reads status from Devices #1 only; with a rest page set, from whichever devices page we sit on.
-        if (_status_due && (devPage == 0 || (devPage > 0 && iaqt_rest_setting() != 0)) && !rssa_commands_waiting()) {
+        if (_status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
+            !rssa_commands_waiting()) {
           iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
           _status_due = false;
-        } else if (!_status_due && _pollCnt >= 0) { // negative = light-programming hold
-          iaqt_rest_page_poll(aqdata, devPage);
         }
       }
       } // !iaqt_status_events
-    } else if (in_programming_mode(aqdata) == true && _aqconfig_.iaqt_status_events) {
+    } else if (in_programming_mode(aqdata) == true && _ev_mode == 1) {
       // The programmer moves pages itself and may consume a pending request; read once it finishes.
       _ev_after_prog = true;
       _ev_requested = false;

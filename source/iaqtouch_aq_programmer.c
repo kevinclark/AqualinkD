@@ -672,7 +672,7 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
       break;
     }
     int settled = 0;
-    // A round that starts on a later device page (iaqt_rest_page) can't see earlier pages; if it finds nothing it is
+    // A round that starts on a later device page (the iaqt_status_events rest page) can't see earlier pages; if it finds nothing it is
     // not an idle round, the next one starts from HOME.
     bool startedPastFirst = (iaqtCurrentPage() == IAQ_PAGE_DEVICES2 || iaqtCurrentPage() == IAQ_PAGE_DEVICES3);
 

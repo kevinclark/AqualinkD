@@ -78,6 +78,7 @@ struct aqconfig
   bool enable_iaqualink;
   bool rssa_send_on_reply;     // also send a queued virtual button on/off in the ack to the panel's 0x13 reply
   int iaqt_status_poll_count;  // iAQ Touch polls between status-page requests; 0 = stock (DEVICE_STATUS_POLL_COUNT)
+  int iaqt_rest_page;          // iAQ Touch device page (2 or 3) to rest on between status reads; 0/1 = stock (Devices #1)
   bool mqtt_publish_log;       // publish log lines to <mqtt_aq_topic>/log
   int mqtt_log_level;          // most verbose level published (LOG_ERR..LOG_DEBUG); also capped by log_level
   unsigned char rssa_watch_first; // read-only probe: poll RS Serial Adapter IDs first..last (0x24-0x33) and log changes
@@ -289,6 +290,7 @@ int _numCfgParams;
 #define CFG_N_enable_iaqualink                  "enable_iaqualink"
 #define CFG_N_rssa_send_on_reply                "rssa_send_on_reply"
 #define CFG_N_iaqt_status_poll_count            "iaqt_status_poll_count"
+#define CFG_N_iaqt_rest_page                    "iaqt_rest_page"
 #define CFG_N_mqtt_publish_log                  "mqtt_publish_log"
 #define CFG_N_mqtt_log_level                    "mqtt_log_level"
 #define CFG_V_mqtt_log_level                    "[\"DEBUG\", \"INFO\", \"NOTICE\", \"WARNING\", \"ERROR\"]"

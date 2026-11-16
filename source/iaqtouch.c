@@ -830,6 +830,57 @@ void processPage(struct aqualinkdata *aqdata)
 static int _pollCnt;
 static bool _status_due = false; // a status-page press came due and waits for the devices page and an idle RSSA queue
 
+// Device page index 0..2 for a devices page, -1 for any other page.
+static int iaqt_device_page_index(unsigned char page)
+{
+  if (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg) return 0;
+  if (page == IAQ_PAGE_DEVICES2) return 1;
+  if (page == IAQ_PAGE_DEVICES3) return 2;
+  return -1;
+}
+
+// iaqt_rest_page (2 or 3): between status reads, sit on that device page instead of Devices #1, so the panel's
+// button pushes for that page reach us and presses there need no page walk. The rest page is a target, never an
+// assumption: from any devices page before it we step forward one page at a time, only when idle, waiting for each
+// page to load. A panel without that page (no Next button), or a walk that keeps failing, falls back to Devices #1
+// (stock) with one log line.
+#define IAQT_REST_WAIT_POLLS 12   // polls to wait for a requested page before trying again (~4 s)
+#define IAQT_REST_MAX_TRIES  6
+static void iaqt_step_toward_rest_page(int devPage)
+{
+  static bool gaveUp = false;
+  static int tries = 0, wait = 0, lastPage = -2;
+
+  if (gaveUp || _aqconfig_.iaqt_rest_page < 2 || _aqconfig_.iaqt_rest_page > 3)
+    return;
+  if (devPage != lastPage) { wait = 0; lastPage = devPage; } // the page moved: the last request is done
+  if (devPage < 0)
+    return;           // HOME/status/popup: the idle cycle brings us back to Devices #1 first
+  int target = _aqconfig_.iaqt_rest_page - 1;
+  if (devPage >= target) {
+    tries = 0;
+    return;
+  }
+  if (wait > 0) { wait--; return; }
+  if (rssa_commands_waiting())
+    return;           // page loads slow the panel's RS Serial Adapter polls; let those go first
+  if (_devicePageButtons[devPage][16].type != 0x03) {
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page=%d: panel has no Devices #%d, resting on Devices #%d\n",
+        _aqconfig_.iaqt_rest_page, target+1, devPage+1);
+    gaveUp = true;
+    return;
+  }
+  if (++tries > IAQT_REST_MAX_TRIES) {
+    LOG(IAQT_LOG,LOG_WARNING, "iaqt_rest_page=%d: Devices #%d would not load after %d tries, resting on Devices #1\n",
+        _aqconfig_.iaqt_rest_page, target+1, IAQT_REST_MAX_TRIES);
+    gaveUp = true;
+    return;
+  }
+  LOG(IAQT_LOG,LOG_DEBUG, "iaqt_rest_page: Devices #%d -> next page\n", devPage+1);
+  iaqt_queue_cmd(KEY_IAQTCH_NEXT_PAGE);
+  wait = IAQT_REST_WAIT_POLLS;
+}
+
 // running through status while programming a lighgt seems to confuse the panel, so let
 // other people reset our poll count.
 #ifdef PLIGHT_IAQTOUCH_FIX
@@ -1129,10 +1180,12 @@ if not programming && poll packet {
                     _aqconfig_.iaqt_status_poll_count : DEVICE_STATUS_POLL_COUNT;
         if (_pollCnt > 0 && _pollCnt % every == 0)
           _status_due = true;
-        if (_status_due && (_currentPage == IAQ_PAGE_DEVICES || _currentPage == IAQ_PAGE_DEVICES_REV_Yg) &&
-            !rssa_commands_waiting()) {
+        int devPage = iaqt_device_page_index(_currentPage);
+        if (_status_due && devPage >= 0 && !rssa_commands_waiting()) {
           iaqt_queue_cmd(KEY_IAQTCH_STATUS); // This will force us to go to status, then it'll jump back to devices, then force status again
           _status_due = false;
+        } else if (!_status_due) {
+          iaqt_step_toward_rest_page(devPage);
         }
       }
     } else if (in_programming_mode(aqdata) == true) {

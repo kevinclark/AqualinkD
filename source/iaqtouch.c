@@ -1096,7 +1096,7 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
     wait = IAQT_REST_WAIT_POLLS;
 }
 
-static int iaqt_device_page_index(unsigned char page)
+int iaqt_device_page_index(unsigned char page)
 {
   if (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg) return 0;
   if (page == IAQ_PAGE_DEVICES2) return 1;

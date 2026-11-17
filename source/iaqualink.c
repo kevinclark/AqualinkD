@@ -76,6 +76,11 @@ int get_iaqualink_cmd(unsigned char source_message_type, unsigned char **dest_me
   *dest_message = _std_cmd;
   int len = 2;
 
+  // An idle iAqualink module answers the panel's 0x53 poll with ack type 0x1f (270 of 270 polls, RS-16 Rev T.1).
+  // Echoing 0x53 there made that panel re-send the whole iAQ Touch device page to the touch ID every ~1.7 s.
+  if (source_message_type == 0x53 && _iaqua_q_length == 0)
+    _std_cmd[0] = 0x1f;
+
   if (source_message_type == 0x73 && _iaqua_q_length > 0) 
   { // Send big/long message
     if ( _iqaua_queue[0].length >= 19 ) {

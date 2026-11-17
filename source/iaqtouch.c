@@ -864,7 +864,6 @@ static int _ev_wait = 0;
 static int _ev_failed_requests = 0;
 static int _ev_offpage = 0;
 static int _ev_followups = 0;
-static bool _ev_after_prog = false;
 static bool _ev_stall_logged = false;
 static time_t _ev_last_read = 0;       // monotonic; 0 = none since start
 static time_t _ev_started = 0;        // start of the current run of idle polls (stall clock)
@@ -1135,10 +1134,6 @@ static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
   memcpy(lastLeds, leds, n * sizeof(aqledstate));
   lastNum = n;
 
-  if (_ev_after_prog) {
-    _ev_after_prog = false;
-    iaqt_status_event("AqualinkD programming finished");
-  }
   if (_ev_due_at == 0 && !_ev_requested && (_ev_last_read == 0 || now - _ev_last_read >= backstop)) {
     LOG(IAQT_LOG,LOG_INFO, "Status page read due: %s\n", _ev_last_read == 0 ? "startup" : "backstop");
     _ev_due_at = now;
@@ -1488,8 +1483,9 @@ if not programming && poll packet {
       }
       } // !iaqt_status_events
     } else if (in_programming_mode(aqdata) == true && _ev_mode == 1) {
-      // The programmer moves pages itself and may consume a pending request; read once it finishes.
-      _ev_after_prog = true;
+      // The programmer moves pages itself and may consume a pending request. _ev_due_at stays set until a read
+      // completes, so a read that was due is requested again once programming finishes. Programming that changes a
+      // pump is caught by the LED, set-RPM and answering triggers, so it needs no read of its own.
       _ev_requested = false;
       _ev_wait = 0;
     } else if (in_programming_mode(aqdata) == true) {

@@ -994,6 +994,9 @@ static bool _rest_gave_up = false;
 // The rest page is chosen automatically in events mode; otherwise Devices #1 (stock).
 static int iaqt_rest_setting(void)
 {
+  // With the iAqualink protocol on, macro state comes from its one-touch status packets, so no device-page rest.
+  if (isIAQL_ACTIVE)
+    return 0;
   return (_ev_mode == 1) ? IAQT_REST_AUTO : 0;
 }
 

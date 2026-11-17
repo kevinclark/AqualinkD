@@ -724,8 +724,15 @@ void caculate_ack_packet(int rs_fd, unsigned char *packet_buffer, emulation_type
       //DEBUG_TIMER_STOP(_rs_packet_timer,AQUA_LOG,"OneTouch Emulation type Processed packet in");
     break;
     case IAQTOUCH:
-      if (packet_buffer[PKT_CMD] != CMD_IAQ_CTRL_READY)
-        send_extended_ack(rs_fd, ACK_IAQ_TOUCH, pop_iaqt_cmd(packet_buffer[PKT_CMD]));
+      if (packet_buffer[PKT_CMD] != CMD_IAQ_CTRL_READY) {
+        // An iAqualink module's own touch session acks page messages with their type (0x24/0x25/0x28). With the
+        // iAqualink protocol on, a 0x00 ack left an RS-16 Rev T.1 panel re-sending the device page every ~1.7 s.
+        // Keys only go out on a poll (pop_iaqt_cmd), so these acks never carry one.
+        unsigned char cmd_in = packet_buffer[PKT_CMD];
+        unsigned char ack = (isIAQL_ACTIVE && (cmd_in == CMD_IAQ_PAGE_BUTTON || cmd_in == CMD_IAQ_PAGE_MSG ||
+                                               cmd_in == CMD_IAQ_PAGE_END)) ? cmd_in : ACK_IAQ_TOUCH;
+        send_extended_ack(rs_fd, ack, pop_iaqt_cmd(cmd_in));
+      }
       else {
         size = ref_iaqt_control_cmd(&cmd);
         send_jandy_command(rs_fd, cmd, size);

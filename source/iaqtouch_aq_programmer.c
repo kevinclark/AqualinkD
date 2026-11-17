@@ -590,6 +590,46 @@ bool iaqt_is_device_page(unsigned char page)
   return (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES2 || page == IAQ_PAGE_DEVICES3 || page == IAQ_PAGE_DEVICES_REV_Yg);
 }
 
+/*
+ * iaqt_status_events keeps the panel on the device pages between status reads (the rest page), so the sweep stays on
+ * them too: it starts from whatever device page is showing, steps NEXT or PREV between device pages, and ends where it
+ * is. HOME only when a page other than a device page is left up (a popup that the panel does not close itself).
+ * Measured 2026-11-16 on an RS-16: each page load ~2.2 s; the old route (HOME after every press, then HOME ->
+ * Devices #1 -> #2 -> #3 for the next) cost a second press ~16 s of navigation.
+ */
+static int iaqt_devpage_index(unsigned char page)
+{
+  if (page == IAQ_PAGE_DEVICES || page == IAQ_PAGE_DEVICES_REV_Yg) return 0;
+  if (page == IAQ_PAGE_DEVICES2) return 1;
+  if (page == IAQ_PAGE_DEVICES3) return 2;
+  return -1;
+}
+
+// A page load in progress (PageStart seen, PageEnd not yet) shows as page NUL: let it finish before choosing a route.
+static void iaqt_wait_page_settled(struct aqualinkdata *aqdata)
+{
+  for (int i = 0; i < 2 && iaqtCurrentPage() == NUL; i++)
+    waitfor_iaqt_nextPage(aqdata);
+}
+
+// After a press: wait until the panel is idle (two polls in a row) or has started a page load, and let a load finish.
+// A macro opens a popup listing its members and the panel returns to the device page by itself (~5.6 s); waiting for
+// that replaces a HOME press and the walk back. Returns true if a long popup message was seen.
+static bool iaqt_settle_after_press(struct aqualinkdata *aqdata)
+{
+  bool popup = (iaqtLastMsg() == CMD_IAQ_MSG_LONG);
+  int polls = 0;
+  for (int i = 0; i < 20 && polls < 2 && iaqtCurrentPage() != NUL; i++) {
+    unsigned char msg = waitfor_iaqt_messages(aqdata, 1);
+    popup |= (msg == CMD_IAQ_MSG_LONG);
+    polls = (msg == CMD_IAQ_POLL) ? polls + 1 : 0;
+  }
+  iaqt_wait_page_settled(aqdata);
+  return popup;
+}
+
+static bool _iaqt_sweep_popup = false; // a long popup message was seen during this sweep (events mode)
+
 // Press every pending button shown on the current device page whose page state differs from its latest intent.
 // Returns how many intents it settled (pressed or found already right); stops at the first sign the page moved.
 static int iaqt_press_pending_on_page(struct aqualinkdata *aqdata, bool *disturbed)
@@ -637,6 +677,12 @@ static int iaqt_press_pending_on_page(struct aqualinkdata *aqdata, bool *disturb
     waitfor_iaqt_messages(aqdata, 1);
     iaqt_done_pending(button, want);
     settled++;
+    if (iaqt_status_events_active() && iaqt_settle_after_press(aqdata)) {
+      _iaqt_sweep_popup = true;
+      LOG(IAQT_LOG, LOG_NOTICE, "Popup after pressing '%s', finishing this page later\n", button->label);
+      *disturbed = true;
+      break;
+    }
 
     // A popup (e.g. a spa safety-delay message) or a page change means this page's keys no longer apply.
     if (iaqtLastMsg() == CMD_IAQ_MSG_LONG || iaqtCurrentPage() != page) {
@@ -665,8 +711,12 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
 
   LOG(IAQT_LOG,LOG_INFO, "Device On/Off sweep, started by '%s', state %d\n",button->label,state);
 
+  const bool stay = iaqt_status_events_active();
+  _iaqt_sweep_popup = false;
   int idle_rounds = 0;
   for (int round = 0; iaqt_any_pending(aqdata, true); round++) {
+    if (stay)
+      iaqt_wait_page_settled(aqdata); // the rest page walk may be mid-load: use the page it lands on
     if (idle_rounds >= IAQT_SWEEP_IDLE_ROUNDS) {
       iaqt_onoff_abandon(aqdata, "not found on any device page, or the pages would not load");
       break;
@@ -685,6 +735,45 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
     // Start from the device page we are on; otherwise HOME -> Devices #1.
     if (!iaqt_is_device_page(iaqtCurrentPage()) && !goto_iaqt_page(IAQ_PAGE_DEVICES, aqdata)) {
       idle_rounds++;
+      continue;
+    }
+
+    if (stay) {
+      // Visit each device page once, nearest unvisited first, by NEXT/PREV from the page showing. Bounded to 4 hops.
+      bool visited[3] = {false, false, false};
+      for (int hop = 0; ; hop++) {
+        bool disturbed;
+        int cur = iaqt_devpage_index(iaqtCurrentPage());
+        if (cur < 0)
+          break;
+        visited[cur] = true;
+        settled += iaqt_press_pending_on_page(aqdata, &disturbed);
+        if (disturbed || !iaqt_any_pending(aqdata, false) || hop >= 4)
+          break;
+        cur = iaqt_devpage_index(iaqtCurrentPage());
+        if (cur < 0)
+          break;
+        struct iaqt_page_button *nb = iaqtFindButtonByIndex(16), *pb = iaqtFindButtonByIndex(15);
+        bool hasNext = (nb != NULL && nb->type == 0x03), hasPrev = (pb != NULL && pb->type == 0x02);
+        int target = -1;
+        for (int d = 1; d <= 2 && target < 0; d++) {
+          if (cur + d <= 2 && !visited[cur + d] && hasNext) target = cur + d;
+          else if (cur - d >= 0 && !visited[cur - d] && hasPrev) target = cur - d;
+        }
+        if (target < 0)
+          break; // every reachable device page seen this round
+        send_aqt_cmd(target > cur ? KEY_IAQTCH_NEXT_PAGE : KEY_IAQTCH_PREV_PAGE);
+        waitfor_iaqt_nextPage(aqdata);
+        iaqt_wait_page_settled(aqdata);
+        if (iaqt_devpage_index(iaqtCurrentPage()) == cur)
+          break; // the key did not move the page
+      }
+      idle_rounds = (settled > 0) ? 0 : idle_rounds + 1;
+      // Left on a page that is not a device page, or a long popup was seen (it may swallow keys): HOME, as before.
+      if (iaqt_any_pending(aqdata, false) && (!iaqt_is_device_page(iaqtCurrentPage()) || _iaqt_sweep_popup)) {
+        send_aqt_cmd(KEY_IAQTCH_HOME);
+        waitfor_iaqt_nextPage(aqdata);
+      }
       continue;
     }
 
@@ -710,8 +799,11 @@ void *set_aqualink_iaqtouch_device_on_off( void *ptr )
   }
 
   // One trip HOME also clears any popup a press raised. (The old code sent HOME, then goto_iaqt_page(HOME) sent it
-  // again before the first had loaded: two HOME page loads, ~3.5 s per press.)
-  if (iaqtCurrentPage() != IAQ_PAGE_HOME) {
+  // again before the first had loaded: two HOME page loads, ~3.5 s per press.) In events mode the sweep ends on the
+  // device page it is on, unless a popup was seen or another page is showing.
+  if (stay && iaqt_is_device_page(iaqtCurrentPage()) && !_iaqt_sweep_popup) {
+    LOG(IAQT_LOG, LOG_DEBUG, "Sweep done, staying on %s\n", iaqt_page_name(iaqtCurrentPage()));
+  } else if (iaqtCurrentPage() != IAQ_PAGE_HOME) {
     send_aqt_cmd(KEY_IAQTCH_HOME);
     waitfor_iaqt_nextPage(aqdata);
   }

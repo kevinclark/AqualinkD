@@ -884,6 +884,12 @@ static void iaqt_ev_due(time_t when)
 
 static int _ev_mode = -1; // -1 undecided (first idle poll decides), 0 stock status cycle, 1 events mode
 
+// For the iAQ Touch programmer: events mode is on (false until the first idle poll decides it).
+bool iaqt_status_events_active(void)
+{
+  return _ev_mode == 1;
+}
+
 // Decided once, at the first idle poll, when the panel type is known.
 static bool iaqt_events_on(void)
 {

@@ -624,6 +624,14 @@ static bool iaqt_settle(struct aqualinkdata *aqdata, int polls)
   return popup;
 }
 
+// After a press: a macro's popup page can get a PageEnd of its own (the panel's once-a-minute clock PageEnd landing in
+// it, 2026-11-16 22:32:24), which reads as a page change. Give the panel ~8 s to return to a device page by itself.
+static void iaqt_wait_device_page(void)
+{
+  for (int i = 0; i < 80 && !iaqt_is_device_page(iaqtCurrentPage()) && iaqtCurrentPage() != IAQ_PAGE_HOME; i++)
+    delay(100);
+}
+
 static bool _iaqt_sweep_popup = false; // a long popup message was seen during this sweep (events mode)
 
 // Press every pending button shown on the current device page whose page state differs from its latest intent.
@@ -673,11 +681,14 @@ static int iaqt_press_pending_on_page(struct aqualinkdata *aqdata, bool *disturb
     waitfor_iaqt_messages(aqdata, 1);
     iaqt_done_pending(button, want);
     settled++;
-    if (iaqt_status_events_active() && iaqt_settle(aqdata, 1)) {
-      _iaqt_sweep_popup = true;
-      LOG(IAQT_LOG, LOG_NOTICE, "Popup after pressing '%s', finishing this page later\n", button->label);
-      *disturbed = true;
-      break;
+    if (iaqt_status_events_active()) {
+      if (iaqt_settle(aqdata, 1)) {
+        _iaqt_sweep_popup = true;
+        LOG(IAQT_LOG, LOG_NOTICE, "Popup after pressing '%s', finishing this page later\n", button->label);
+        *disturbed = true;
+        break;
+      }
+      iaqt_wait_device_page();
     }
 
     // A popup (e.g. a spa safety-delay message) or a page change means this page's keys no longer apply.

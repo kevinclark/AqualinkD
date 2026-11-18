@@ -33,6 +33,7 @@
 #include "aq_programmer.h"
 #include "utils.h"
 #include "net_services.h"
+#include "mqtt_alive.h"
 #include "json_messages.h"
 #include "aq_mqtt.h"
 #include "devices_jandy.h"
@@ -649,6 +650,8 @@ void send_mqtt_string_msg(struct mg_connection *nc, const char *dev_name, const 
 
 #define MQTT_TIMED_UDATE 300 //(in seconds)
 
+static const char *_last_mqtt_alive = NULL; // Alive payload last sent (mqtt_alive.h)
+
 void mqtt_broadcast_aqualinkstate(struct mg_connection *nc)
 {
   int i;
@@ -674,6 +677,16 @@ void mqtt_broadcast_aqualinkstate(struct mg_connection *nc)
   }
 
 //LOG(NET_LOG,LOG_INFO, "mqtt_broadcast_aqualinkstate: START\n");
+
+  // Alive: "1" once talking to the panel, "2" before (mqtt_alive.h), so HA shows the pool unavailable, not off, at start-up.
+  const char *alive = mqtt_alive_payload(_aqualink_data->status_mask);
+  if (_last_mqtt_alive == NULL || strcmp(_last_mqtt_alive, alive) != 0) {
+    char alive_topic[30];
+    snprintf(alive_topic, 24, "%s/%s", _aqconfig_.mqtt_aq_topic, MQTT_LWM_TOPIC);
+    LOG(NET_LOG,LOG_NOTICE, "MQTT: Alive %s (%s)\n", alive, alive[0] == '1' ? "talking to the panel" : "not talking to the panel yet");
+    send_mqtt(nc, alive_topic, alive);
+    _last_mqtt_alive = alive;
+  }
 
   if (_aqualink_data->service_mode_state != _last_mqtt_aqualinkdata.service_mode_state) {
      _last_mqtt_aqualinkdata.service_mode_state = _aqualink_data->service_mode_state;
@@ -2097,9 +2110,10 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data) {
       LOG(NET_LOG,LOG_INFO, "MQTT: Subscribing to '%s'\n", aq_topic);
       mg_mqtt_sub(nc, &sub_opts);
       
-      LOG(NET_LOG,LOG_INFO, "MQTT: sending Alive message (last will message)\n");
+      _last_mqtt_alive = mqtt_alive_payload(_aqualink_data->status_mask);
+      LOG(NET_LOG,LOG_INFO, "MQTT: sending Alive message %s (last will message is 0)\n", _last_mqtt_alive);
       snprintf(aq_topic, 24, "%s/%s", _aqconfig_.mqtt_aq_topic,MQTT_LWM_TOPIC);
-      send_mqtt(nc, aq_topic ,MQTT_ON);
+      send_mqtt(nc, aq_topic, _last_mqtt_alive);
 
       publish_mqtt_discovery( _aqualink_data, nc);
     }

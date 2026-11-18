@@ -34,8 +34,15 @@ void send_mqtt(struct mg_connection *nc, const char *toppic, const char *message
 
 //                        " \"configuration_url\": \"%s\"".  _aqconfig_.listen_address
 
+// Alive is "0" offline, "1" talking to the panel, "2" running but not yet talking to it (mqtt_alive.h). Device entities
+// are available only on "1"; the status line also on "2".
 #define HASS_AVAILABILITY "\"payload_available\" : \"1\"," \
                           "\"payload_not_available\" : \"0\"," \
+                          "\"value_template\": \"{{ '1' if value == '1' else '0' }}\"," \
+                          "\"topic\": \"%s/" MQTT_LWM_TOPIC "\""
+#define HASS_AVAILABILITY_LINK "\"payload_available\" : \"1\"," \
+                          "\"payload_not_available\" : \"0\"," \
+                          "\"value_template\": \"{{ '0' if value == '0' else '1' }}\"," \
                           "\"topic\": \"%s/" MQTT_LWM_TOPIC "\""
   
 
@@ -365,7 +372,7 @@ Or add separate text sensor. (this would be better options, that way you can see
 */
 const char *HASSIO_TEXT_SENSOR_DISCOVER = "{"
    "\"device\": {" HASS_DEVICE "},"
-   "\"availability\": {" HASS_AVAILABILITY "},"
+   "\"availability\": {" HASS_AVAILABILITY_LINK "},"
    "\"type\": \"sensor\","
    "\"unique_id\": \"aqualinkd_%s\","
    "\"name\": \"%s\","

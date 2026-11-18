@@ -1056,6 +1056,18 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
   static int tries = 0, wait = 0, lastPage = -2;
   int setting = iaqt_rest_setting();
 
+  // With the iAqualink protocol on, the panel streams a shown device page to this ID nonstop (~0.6 s of bus every
+  // ~1.7 s); an iAqualink module's own touch session idles on HOME. So idle on HOME (test build).
+  if (isIAQL_ACTIVE) {
+    static int hwait = 0;
+    if (devPage < 0 || rssa_commands_waiting())
+      return;
+    if (hwait > 0) { hwait--; return; }
+    if (iaqt_queue_cmd(KEY_IAQTCH_HOME))
+      hwait = IAQT_REST_WAIT_POLLS;
+    return;
+  }
+
   if (setting == 0 || _rest_gave_up || devPage < 0)
     return;
   if (devPage != lastPage) { // the page moved: the last request is done

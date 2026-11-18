@@ -104,6 +104,15 @@ int get_iaqualink_cmd(unsigned char source_message_type, unsigned char **dest_me
   return len;
 }
 
+// A button press (19-byte command) still waiting to go out.
+static bool iaqualink_press_queued() {
+  for (int i = 0; i < _iaqua_q_length; i++) {
+    if (_iqaua_queue[i].length >= 19)
+      return true;
+  }
+  return false;
+}
+
 void remove_iaqualink_cmd() {
   if (_iaqua_q_length > 0 && _aqua_last_cmdfrom_queue == true) {
     LOG(IAQL_LOG,LOG_DEBUG, "Remove from message queue, length %d\n",_iaqua_q_length-1);
@@ -554,6 +563,7 @@ bool process_iAqualinkStatusPacket(unsigned char *packet, int length, struct aqu
     logPacket(IAQL_LOG, LOG_INFO, packet, length, true);
     int numLabels = packet[4];
     int start = numLabels + 4 + 1;
+    bool press_queued = iaqualink_press_queued();
 
     if (numLabels == 1)
     {
@@ -569,6 +579,8 @@ bool process_iAqualinkStatusPacket(unsigned char *packet, int length, struct aqu
       int byteType = packet[5 + i];
       LOG(IAQL_LOG, LOG_INFO, "%-15.*s = %s | index %d type=(%0.2d 0x%02hhx) status=0x%02hhx start=%d length=%d\n", length, &packet[start + 2], (status == 0x00 ? "Off" : "On "), i, byteType, byteType, status, start, length);
       // Check against virtual onetouch buttons.
+      // Not while a press is still queued: this reply predates it and would undo the pre-set LED, so a quick
+      // second request would be dropped or toggle the wrong way. The panel pushes the new state once it acts.
 
       // NSF This needs to check strlingth, ie "Spa Mode" vs "Spa"
      if ( aqdata->virtual_button_start > 0 ) {
@@ -577,7 +589,7 @@ bool process_iAqualinkStatusPacket(unsigned char *packet, int length, struct aqu
         if (rsm_strcmp((char *)&packet[start + 2], aqdata->aqbuttons[bi].label) == 0) {
           //LOG(IAQL_LOG, LOG_INFO, "Status for %s is %s\n",aqdata->aqbuttons[bi].label,(status == 0x00 ? "Off" : "On "));
           // == means doesn;t match, RS 1=on 0=off / LED enum 1=off 0=on
-          if (aqdata->aqbuttons[bi].led->state == status) {
+          if (aqdata->aqbuttons[bi].led->state == status && !press_queued) {
             LOG(IAQL_LOG, LOG_INFO, "Updated Status for %s is %s\n",aqdata->aqbuttons[bi].label,(status == 0x00 ? "Off" : "On "));
             SET_IF_CHANGED(aqdata->aqbuttons[bi].led->state, (status == 0x00 ? OFF:ON), aqdata->is_dirty);
           }

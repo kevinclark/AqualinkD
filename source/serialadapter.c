@@ -319,6 +319,16 @@ void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn)
   _rssa_vbutton_recheck[button->rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS; // and again a few seconds later
 }
 
+// A OneTouch macro can switch RS Serial Adapter virtual buttons, whose state otherwise only arrives with the read-back
+// cycle (every 100 packets, ~25 s). After a macro press, read them all back on the usual recheck delay.
+void rssa_recheck_vbuttons(struct aqualinkdata *aqdata)
+{
+  for (int i = 0; i < aqdata->total_buttons; i++) {
+    if (isRSSA_VBUTTON_ID(aqdata->aqbuttons[i].rssa_id))
+      _rssa_vbutton_recheck[aqdata->aqbuttons[i].rssa_id] = RSSA_VBUTTON_RECHECK_PACKETS;
+  }
+}
+
 static void rssa_vbutton_recheck_tick()
 {
   for (int id = RSSA_VBUTTON_ID_MIN; id <= RSSA_VBUTTON_ID_MAX; id++) {

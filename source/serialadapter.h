@@ -13,6 +13,7 @@ bool process_rssadapter_packet(unsigned char *packet, int length, struct aqualin
 
 //void set_aqualink_rssadapter_aux_state(int buttonIndex, bool turnOn);
 void set_aqualink_rssadapter_vbutton_state(const aqkey *button, bool turnOn);
+void rssa_recheck_vbuttons(struct aqualinkdata *aqdata);
 
 // RS Serial Adapter device IDs accepted for virtual_button_NN_rssaID: AUX16-31, above the panel's own AUX1-15 (0x15-0x23).
 #define RSSA_VBUTTON_ID_MIN 0x24

@@ -1541,6 +1541,8 @@ bool setDeviceState(struct aqualinkdata *aqdata, int deviceIndex, bool isON, req
           {
             //LOG(PANL_LOG, LOG_NOTICE, "********** USE iaqualink2 ********\n");
             set_iaqualink_aux_state(button, isON);
+            if (isRSSA_ENABLED)
+              rssa_recheck_vbuttons(aqdata); // a macro may have switched RS Serial Adapter virtual buttons
           } else {
             // One sweep thread presses every pending button; only start one if none is queued or running.
             if (iaqt_onoff_request(button, isON))

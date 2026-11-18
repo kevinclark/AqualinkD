@@ -978,7 +978,8 @@ static void iaqt_status_read_done(struct aqualinkdata *aqdata)
  changes for the page on screen (one pButton + PageEnd, ~0.6 s), and a press there needs no page walk, so the best page
  is the one holding buttons AqualinkD can learn no other way: OneTouch macros and virtual buttons without an RS Serial
  Adapter ID. Standard buttons have AllButton LEDs, RS-16 B buttons the AllButton messages. It walks the device pages once,
- then rests on the page with most such buttons (ties and none: the lower page), logging the choice. Each status read
+ then rests on the page with most such buttons (ties and none: the lower page), logging the choice. With the iAqualink
+ protocol on, the rest page is HOME instead (iaqt_rest_page_poll explains why). Each status read
  comes back through HOME and Devices #1, so a later rest page costs one extra page load per page per read; with event
  reads that is small. The rest page is a target, never an assumption: from any devices page before it we step forward
  one page at a time, only when idle, waiting for each page. A missing page rests where it is; a walk that keeps failing
@@ -990,6 +991,7 @@ static void iaqt_status_read_done(struct aqualinkdata *aqdata)
 #define IAQT_REST_MAX_TRIES      6
 static int _rest_target = IAQT_REST_UNDECIDED; // device page index 0..2 once decided
 static bool _rest_gave_up = false;
+static int _home_wait = 0;     // iAqualink protocol on: polls to wait for a requested HOME before asking again
 
 // The rest page is chosen automatically in events mode; otherwise Devices #1 (stock).
 static int iaqt_rest_setting(void)
@@ -1052,6 +1054,19 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
 {
   static int tries = 0, wait = 0, lastPage = -2;
   int setting = iaqt_rest_setting();
+
+  // With the iAqualink protocol on, the panel re-sends whatever device page this ID shows, nonstop (measured on an
+  // RS-16 Rev T.1: ~13 buttons every ~1.7 s, about half the bus; a room of six RS Serial Adapter lights 2.3 -> 5 s).
+  // A physical iAqualink module's own touch session idles on HOME. The iAqualink one-touch status reports the
+  // OneTouch macros (pushed by the panel on a change), so walk back to HOME instead of to a device page.
+  if (isIAQL_ACTIVE) {
+    if (devPage < 0 || rssa_commands_waiting())
+      return;
+    if (_home_wait > 0) { _home_wait--; return; }
+    if (iaqt_queue_cmd(KEY_IAQTCH_HOME))
+      _home_wait = IAQT_REST_WAIT_POLLS;
+    return;
+  }
 
   if (setting == 0 || _rest_gave_up || devPage < 0)
     return;
@@ -1152,15 +1167,26 @@ static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
     _ev_stall_logged = true;
   }
 
-  if (iaqt_is_device_page(_currentPage)) {
+  // HOME is the rest page while the iAqualink protocol is on, so status reads start from there too.
+  bool atRest = iaqt_is_device_page(_currentPage) || (isIAQL_ACTIVE && _currentPage == IAQ_PAGE_HOME);
+  if (isIAQL_ACTIVE && _currentPage == IAQ_PAGE_HOME) {
+    static bool logged = false;
+    if (!logged) {
+      LOG(IAQT_LOG,LOG_NOTICE, "iaqt_status_events: iAqualink protocol on, resting on HOME (device pages are re-sent nonstop)\n");
+      logged = true;
+    }
+    _home_wait = 0;
+  }
+  if (atRest) {
     _ev_offpage = 0;
     if (!hold && _ev_due_at != 0 && now >= _ev_due_at && !_ev_requested && now - _ev_last_read >= IAQT_EV_MIN_GAP_SECS &&
         !rssa_commands_waiting()) {
-      if (iaqt_queue_cmd(KEY_IAQTCH_STATUS)) { // status, then HOME, then back to devices (processPage)
+      if (iaqt_queue_cmd(KEY_IAQTCH_STATUS)) { // status, then HOME (processPage), then the rest page
         _ev_requested = true;
         _ev_wait = 0;
       }
-    } else if (!hold && !_ev_requested && (_ev_due_at == 0 || _ev_due_at > now + IAQT_EV_DELAY_SECS)) {
+    } else if (!hold && !_ev_requested && (_ev_due_at == 0 || _ev_due_at > now + IAQT_EV_DELAY_SECS) &&
+               iaqt_is_device_page(_currentPage)) {
       iaqt_rest_page_poll(aqdata, iaqt_device_page_index(_currentPage));
     }
   } else if (_currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
@@ -1422,7 +1448,8 @@ if not programming && poll packet {
     if (in_programming_mode(aqdata) == false) {
       //LOG(IAQT_LOG,LOG_DEBUG, "Poll counter = %d\n",_pollCnt);
 
-      if (_currentPage == IAQ_PAGE_HOME) {
+      // In events mode with the iAqualink protocol on, HOME is the rest page (see iaqt_rest_page_poll).
+      if (_currentPage == IAQ_PAGE_HOME && !(isIAQL_ACTIVE && iaqt_events_on())) {
         iaqt_queue_cmd(KEY_IAQTCH_HOMEP_KEY08); // This is "other devices on/off" page
         _pollCnt = 0;
       }

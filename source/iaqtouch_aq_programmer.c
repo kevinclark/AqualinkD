@@ -591,8 +591,8 @@ bool iaqt_is_device_page(unsigned char page)
 }
 
 /*
- * iaqt_status_events keeps the panel on the device pages between status reads (the rest page), so the sweep stays on
- * them too: it starts from whatever device page is showing, walks NEXT to later device pages, and ends where it is.
+ * iaqt_status_events keeps the panel on the device pages between status reads (the rest page; HOME instead when the
+ * iAqualink protocol is on, which then walks back there afterwards), so the sweep stays on them too: it starts from whatever device page is showing, walks NEXT to later device pages, and ends where it is.
  * HOME only when something is still pending at the end of a round (it may be on an earlier page: HOME -> Devices #1,
  * the proven route; PREV has never been sent to a panel here), or when a non-device page or a long popup is up.
  * Measured 2026-11-16 on an RS-16: each page load ~2.2 s; the old route (HOME after every press, then HOME ->

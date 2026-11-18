@@ -34,6 +34,7 @@
 #include "aqualink.h"
 #include "utils.h"
 #include "config.h"
+#include "startup_probe.h"
 #include "aq_serial.h"
 #include "aq_panel.h"
 #include "aq_programmer.h"
@@ -966,6 +967,7 @@ void main_loop()
     SET_DIRTY(_aqualink_data.is_dirty);
   }
   i=0;
+  time_t first_msg = 0, first_msg_rssa = 0, first_msg_extended = 0; // first non-probe message to each ID while waiting (startup_accept_secs)
 
   // Loop until we get the probe messages, that means we didn;t start too soon after last shutdown.
   while ( is_valid_port(rs_fd) && (got_probe == false || got_probe_rssa == false || got_probe_extended == false || auto_config_complete == false) && _keepRunning == true && _cmdln_nostartupcheck == false)
@@ -1024,9 +1026,12 @@ void main_loop()
     }
     else if (packet_length > 0 && packet_buffer[PKT_DEST] == _aqconfig_.device_id && got_probe == false) {
       blank_read = 0;
-      if (packet_buffer[PKT_CMD] == CMD_PROBE) {
+      if (startup_probe_seen(packet_buffer[PKT_CMD] == CMD_PROBE, startup_probe_now(), &first_msg, _aqconfig_.startup_accept_secs)) {
          got_probe = true;
-         LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' Standard Protocol\n",_aqconfig_.device_id);
+         if (packet_buffer[PKT_CMD] == CMD_PROBE)
+           LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' Standard Protocol\n",_aqconfig_.device_id);
+         else
+           LOG(AQUA_LOG,LOG_NOTICE, "No probe on '0x%02hhx' Standard Protocol, but the panel has been sending it messages for %ld s; taking it as present (startup_accept_secs)\n",_aqconfig_.device_id,(long)(startup_probe_now() - first_msg));
       } else {
         if(!print_once) {
           LOG(AQUA_LOG,LOG_NOTICE, "Got message but no probe on '0x%02hhx', did we start too soon? (waiting for probe)\n",_aqconfig_.device_id);
@@ -1037,9 +1042,12 @@ void main_loop()
     }
     else if (packet_length > 0 && packet_buffer[PKT_DEST] == _aqconfig_.rssa_device_id && got_probe_rssa == false) {
       blank_read = 0;
-      if (packet_buffer[PKT_CMD] == CMD_PROBE) {
+      if (startup_probe_seen(packet_buffer[PKT_CMD] == CMD_PROBE, startup_probe_now(), &first_msg_rssa, _aqconfig_.startup_accept_secs)) {
          got_probe_rssa = true;
-         LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' RS SerialAdapter Protocol\n",_aqconfig_.rssa_device_id);
+         if (packet_buffer[PKT_CMD] == CMD_PROBE)
+           LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' RS SerialAdapter Protocol\n",_aqconfig_.rssa_device_id);
+         else
+           LOG(AQUA_LOG,LOG_NOTICE, "No probe on '0x%02hhx' RS SerialAdapter Protocol, but the panel has been sending it messages for %ld s; taking it as present (startup_accept_secs)\n",_aqconfig_.rssa_device_id,(long)(startup_probe_now() - first_msg_rssa));
       } else {
         if(!print_once) {
           LOG(AQUA_LOG,LOG_NOTICE, "Got message but no probe on '0x%02hhx', did we start too soon? (waiting for probe)\n",_aqconfig_.rssa_device_id);
@@ -1050,9 +1058,12 @@ void main_loop()
     }
     else if (packet_length > 0 && packet_buffer[PKT_DEST] == _aqconfig_.extended_device_id && got_probe_extended == false) {
       blank_read = 0;
-      if (packet_buffer[PKT_CMD] == CMD_PROBE) {
+      if (startup_probe_seen(packet_buffer[PKT_CMD] == CMD_PROBE, startup_probe_now(), &first_msg_extended, _aqconfig_.startup_accept_secs)) {
          got_probe_extended = true;
-         LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' Extended Protocol\n",_aqconfig_.extended_device_id);
+         if (packet_buffer[PKT_CMD] == CMD_PROBE)
+           LOG(AQUA_LOG,LOG_NOTICE, "Got probe on '0x%02hhx' Extended Protocol\n",_aqconfig_.extended_device_id);
+         else
+           LOG(AQUA_LOG,LOG_NOTICE, "No probe on '0x%02hhx' Extended Protocol, but the panel has been sending it messages for %ld s; taking it as present (startup_accept_secs)\n",_aqconfig_.extended_device_id,(long)(startup_probe_now() - first_msg_extended));
       } else {
         if(!print_once) {
           LOG(AQUA_LOG,LOG_NOTICE, "Got message but no probe on '0x%02hhx', did we start too soon? (waiting for probe)\n",_aqconfig_.extended_device_id);

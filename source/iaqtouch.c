@@ -1053,6 +1053,25 @@ static void iaqt_rest_page_poll(struct aqualinkdata *aqdata, int devPage)
   static int tries = 0, wait = 0, lastPage = -2;
   int setting = iaqt_rest_setting();
 
+  // With the iAqualink protocol on, the panel re-sends whatever device page this ID shows, nonstop (measured on an
+  // RS-16 Rev T.1: ~13 buttons every ~1.7 s, about half the bus; room of six RS Serial Adapter lights 2.3 -> 5 s).
+  // A physical iAqualink module's own touch session idles on HOME, and the iAqualink status packets carry the
+  // device and one-touch states, so idle on HOME instead of a device page.
+  if (isIAQL_ACTIVE) {
+    static int hwait = 0;
+    static bool logged = false;
+    if (!logged) {
+      LOG(IAQT_LOG,LOG_NOTICE, "iaqt_status_events: iAqualink protocol on, resting on HOME (device pages are re-sent nonstop)\n");
+      logged = true;
+    }
+    if (devPage < 0 || rssa_commands_waiting())
+      return;
+    if (hwait > 0) { hwait--; return; }
+    if (iaqt_queue_cmd(KEY_IAQTCH_HOME))
+      hwait = IAQT_REST_WAIT_POLLS;
+    return;
+  }
+
   if (setting == 0 || _rest_gave_up || devPage < 0)
     return;
   if (devPage != lastPage) { // the page moved: the last request is done
@@ -1152,15 +1171,18 @@ static void iaqt_status_events_poll(struct aqualinkdata *aqdata)
     _ev_stall_logged = true;
   }
 
-  if (iaqt_is_device_page(_currentPage)) {
+  // HOME is the rest page while the iAqualink protocol is on, so status reads start from there too.
+  bool atRest = iaqt_is_device_page(_currentPage) || (isIAQL_ACTIVE && _currentPage == IAQ_PAGE_HOME);
+  if (atRest) {
     _ev_offpage = 0;
     if (!hold && _ev_due_at != 0 && now >= _ev_due_at && !_ev_requested && now - _ev_last_read >= IAQT_EV_MIN_GAP_SECS &&
         !rssa_commands_waiting()) {
-      if (iaqt_queue_cmd(KEY_IAQTCH_STATUS)) { // status, then HOME, then back to devices (processPage)
+      if (iaqt_queue_cmd(KEY_IAQTCH_STATUS)) { // status, then HOME (processPage), then the rest page
         _ev_requested = true;
         _ev_wait = 0;
       }
-    } else if (!hold && !_ev_requested && (_ev_due_at == 0 || _ev_due_at > now + IAQT_EV_DELAY_SECS)) {
+    } else if (!hold && !_ev_requested && (_ev_due_at == 0 || _ev_due_at > now + IAQT_EV_DELAY_SECS) &&
+               iaqt_is_device_page(_currentPage)) {
       iaqt_rest_page_poll(aqdata, iaqt_device_page_index(_currentPage));
     }
   } else if (_currentPage != IAQ_PAGE_HOME && ++_ev_offpage > IAQT_EV_OFFPAGE_POLLS) {
@@ -1422,7 +1444,8 @@ if not programming && poll packet {
     if (in_programming_mode(aqdata) == false) {
       //LOG(IAQT_LOG,LOG_DEBUG, "Poll counter = %d\n",_pollCnt);
 
-      if (_currentPage == IAQ_PAGE_HOME) {
+      // In events mode with the iAqualink protocol on, HOME is the rest page (see iaqt_rest_page_poll).
+      if (_currentPage == IAQ_PAGE_HOME && !(isIAQL_ACTIVE && iaqt_events_on())) {
         iaqt_queue_cmd(KEY_IAQTCH_HOMEP_KEY08); // This is "other devices on/off" page
         _pollCnt = 0;
       }

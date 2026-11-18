@@ -1437,7 +1437,7 @@ if not programming && poll packet {
     if (in_programming_mode(aqdata) == false) {
       //LOG(IAQT_LOG,LOG_DEBUG, "Poll counter = %d\n",_pollCnt);
 
-      if (_currentPage == IAQ_PAGE_HOME) {
+      if (_currentPage == IAQ_PAGE_HOME && !(isIAQL_ACTIVE && iaqt_events_on())) { // iAqualink on: idle on HOME (test build)
         iaqt_queue_cmd(KEY_IAQTCH_HOMEP_KEY08); // This is "other devices on/off" page
         _pollCnt = 0;
       }

@@ -7,8 +7,8 @@
 // Start-up: AqualinkD waits for the panel to probe each of its IDs before answering anything. A panel that still
 // believes an ID is present keeps sending it status polls (or, for an iAQ Touch, its 0x29 start-up and page frames) and
 // may not probe it for a long time: on an RS-16 Rev T.1 (2026-11-17) the iAQ Touch ID was not probed in 30 min while the
-// panel resent its start-up frame every ~0.5 s, and AqualinkD answered nothing meanwhile. ~50 normal restarts the same
-// day all saw every probe within ~26 s. With startup_accept_secs > 0, an ID that has received messages but no probe for
+// panel resent its start-up frame every ~0.5 s, and AqualinkD answered nothing meanwhile. 44 normal restarts 11-15..17
+// all saw every probe within 42 s (median 21 s). With startup_accept_secs > 0, an ID that has received messages but no probe for
 // that long counts as probed. 0 = stock behaviour (wait for the probe).
 // Times are monotonic seconds (startup_probe_now): the Pi has no RTC, and NTP can step the wall clock at boot.
 // *first is the time of the ID's first non-probe message (0 = none yet). Returns true when this packet completes the

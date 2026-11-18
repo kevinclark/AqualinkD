@@ -116,6 +116,10 @@ void processLEDstate(struct aqualinkdata *aqdata, unsigned char *packet, logmask
     }
   }
 #endif
+  if (!aqdata->panel_state_read) { // first real circuit state since start: MQTT Alive can say "1" (mqtt_alive.h)
+    aqdata->panel_state_read = true;
+    SET_DIRTY(aqdata->is_dirty);
+  }
 }
 
 void setUnits(char *msg, struct aqualinkdata *aqdata)

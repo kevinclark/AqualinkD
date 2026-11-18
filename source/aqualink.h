@@ -435,6 +435,7 @@ struct aqualinkdata
 {
   //panel_status panelstatus;
   uint16_t status_mask;
+  bool panel_state_read; // a panel LED status has been applied since start (MQTT Alive "1", mqtt_alive.h)
   //char version[AQ_MSGLEN*2]; // Will be replaced by below in future
   //char revision[AQ_MSGLEN]; // Will be replaced by below in future
   uint8_t updatetype;

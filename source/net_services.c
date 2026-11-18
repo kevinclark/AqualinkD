@@ -677,16 +677,8 @@ void mqtt_broadcast_aqualinkstate(struct mg_connection *nc)
   }
 
 //LOG(NET_LOG,LOG_INFO, "mqtt_broadcast_aqualinkstate: START\n");
-
-  // Alive: "1" once talking to the panel, "2" before (mqtt_alive.h), so HA shows the pool unavailable, not off, at start-up.
-  const char *alive = mqtt_alive_payload(_aqualink_data->status_mask);
-  if (_last_mqtt_alive == NULL || strcmp(_last_mqtt_alive, alive) != 0) {
-    char alive_topic[30];
-    snprintf(alive_topic, 24, "%s/%s", _aqconfig_.mqtt_aq_topic, MQTT_LWM_TOPIC);
-    LOG(NET_LOG,LOG_NOTICE, "MQTT: Alive %s (%s)\n", alive, alive[0] == '1' ? "talking to the panel" : "not talking to the panel yet");
-    send_mqtt(nc, alive_topic, alive);
-    _last_mqtt_alive = alive;
-  }
+  // Snapshot before publishing states, so Alive "1" (sent last) never precedes a state read from before the first status.
+  const char *alive = mqtt_alive_payload(_aqualink_data->status_mask, _aqualink_data->panel_state_read);
 
   if (_aqualink_data->service_mode_state != _last_mqtt_aqualinkdata.service_mode_state) {
      _last_mqtt_aqualinkdata.service_mode_state = _aqualink_data->service_mode_state;
@@ -978,6 +970,16 @@ void mqtt_broadcast_aqualinkstate(struct mg_connection *nc)
       send_mqtt_float_msg(nc, topic, _aqualink_data->sensors[i].value);
       _last_mqtt_aqualinkdata.sensors[i].value = _aqualink_data->sensors[i].value;
     }
+  }
+
+  // Alive last, after this cycle's states: "1" once talking to the panel with its states applied, "2" before
+  // (mqtt_alive.h), so HA shows the pool unavailable, not at its start-up defaults.
+  if (_last_mqtt_alive == NULL || strcmp(_last_mqtt_alive, alive) != 0) {
+    char alive_topic[30];
+    snprintf(alive_topic, 24, "%s/%s", _aqconfig_.mqtt_aq_topic, MQTT_LWM_TOPIC);
+    LOG(NET_LOG,LOG_NOTICE, "MQTT: Alive %s (%s)\n", alive, alive[0] == '1' ? "talking to the panel, states read" : "not talking to the panel yet");
+    send_mqtt(nc, alive_topic, alive);
+    _last_mqtt_alive = alive;
   }
 }
 
@@ -2110,12 +2112,13 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data) {
       LOG(NET_LOG,LOG_INFO, "MQTT: Subscribing to '%s'\n", aq_topic);
       mg_mqtt_sub(nc, &sub_opts);
       
-      _last_mqtt_alive = mqtt_alive_payload(_aqualink_data->status_mask);
+      // Discovery first, so HA has the availability template before it sees a "2" (an old config would ignore it).
+      publish_mqtt_discovery( _aqualink_data, nc);
+
+      _last_mqtt_alive = mqtt_alive_payload(_aqualink_data->status_mask, _aqualink_data->panel_state_read);
       LOG(NET_LOG,LOG_INFO, "MQTT: sending Alive message %s (last will message is 0)\n", _last_mqtt_alive);
       snprintf(aq_topic, 24, "%s/%s", _aqconfig_.mqtt_aq_topic,MQTT_LWM_TOPIC);
       send_mqtt(nc, aq_topic, _last_mqtt_alive);
-
-      publish_mqtt_discovery( _aqualink_data, nc);
     }
     break;
 

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "aq_serial.h"
 #include "aqualink.h"
@@ -41,6 +42,15 @@ iaqualink_cmd _iqaua_queue[IAQUA_QLEN];
 unsigned char _std_cmd[2];
 int _iaqua_q_length = 0;
 bool _aqua_last_cmdfrom_queue = false;
+
+// After a button press, ask for one-touch and aux status twice (~2 s and ~5 s later): the panel pushes the pressed
+// one-touch's own state at once, but a macro's member circuits only show up in the next aux status, which the
+// periodic request may not send for ~45 s.
+#define IAQL_REFRESH_FIRST_SECS 2
+#define IAQL_REFRESH_NEXT_SECS  3
+#define IAQL_REFRESH_COUNT      2
+static time_t _iaql_refresh_at = 0;
+static int _iaql_refresh_left = 0;
 
 
 unsigned char _cmd_readyCommand[] = {0x3f, 0x20};
@@ -273,6 +283,8 @@ void set_iaqualink_aux_state(aqkey *button, bool isON) {
   if (_fullcmd[4] != 0xFF) {
     push_iaqualink_cmd(_cmd_readyCommand, 2);
     push_iaqualink_cmd(_fullcmd, 19);
+    _iaql_refresh_at = time(NULL) + IAQL_REFRESH_FIRST_SECS;
+    _iaql_refresh_left = IAQL_REFRESH_COUNT;
   } else {
      LOG(IAQL_LOG, LOG_ERR, "Couldn't find iaqualink keycode for button %s\n",button->label);
   }
@@ -681,6 +693,12 @@ bool process_iaqualink_packet(unsigned char *packet, int length, struct aqualink
 
     if (packet[PKT_CMD] == 0x53)
     {
+      if (_iaql_refresh_left > 0 && _iaqua_q_length == 0 && time(NULL) >= _iaql_refresh_at) {
+        push_iaqualink_cmd(cmd_getTouchstatus, 2);
+        push_iaqualink_cmd(cmd_getAuxstatus, 2);
+        _iaql_refresh_left--;
+        _iaql_refresh_at = time(NULL) + IAQL_REFRESH_NEXT_SECS;
+      }
       cnt++;
       if (cnt >= IAQALINK_STATUS_POLL_COUNT) { // 20 is probably too low, should increase.  (only RS16 and below)
         cnt=0;
